@@ -3,11 +3,11 @@
 
 Registered in ~/.claude/settings.json for these hook events:
     SessionStart      -> live
-    UserPromptSubmit  -> working
-    PostToolUse       -> working (clears needs_input once an approved tool runs)
-    Notification      -> notify (mapped to needs_input for permission prompts)
+    UserPromptSubmit  -> working (starts the turn clock)
+    PostToolUse       -> tool    (back to working; turn clock keeps running)
+    Notification      -> notify  (needs_input, plus what Claude is waiting on)
     Stop              -> done
-    SessionEnd        -> ended (removes the status file)
+    SessionEnd        -> ended   (removes the status file)
 
 Reads the hook payload JSON from stdin. Writes one JSON file per session to
 ~/.claude/chat-status/<session_id>.json. Always exits 0 so it never blocks Claude.
@@ -41,12 +41,6 @@ def main():
             pass
         return
 
-    if status == "notify":
-        # Claude Code's Notification hook fires only to get your attention:
-        # permission prompts, and idle waits (~60s sitting on a question/input).
-        # Both mean "needs you", so any notification flips the chat to needs_input.
-        status = "needs_input"
-
     # Merge with the existing entry so fields like title survive status-only updates.
     entry = {}
     try:
@@ -79,10 +73,33 @@ def main():
         entry["branch"] = branch
         entry["cwd"] = cwd
 
+    now = int(time.time())
+
+    if status == "working":
+        # A fresh user prompt starts a new turn; the app measures "working" age
+        # against this, not updated_at (which tool events keep refreshing).
+        entry["turn_started_at"] = now
+        entry.pop("waiting_on", None)
+    elif status == "tool":
+        # Tool activity flips an answered permission prompt back to working
+        # without restarting the turn clock.
+        status = "working"
+        entry.pop("waiting_on", None)
+    elif status == "notify":
+        # Claude Code's Notification hook fires only to get your attention:
+        # permission prompts, and idle waits (~60s sitting on a question/input).
+        # Both mean "needs you"; the payload message says what it's blocked on.
+        status = "needs_input"
+        msg = " ".join((payload.get("message") or "").split())
+        if msg:
+            entry["waiting_on"] = msg[:160]
+    elif status == "done":
+        entry.pop("waiting_on", None)
+
     entry.update({
         "session_id": sid,
         "status": status,
-        "updated_at": int(time.time()),
+        "updated_at": now,
     })
 
     # UserPromptSubmit payloads carry the prompt text: first prompt names the

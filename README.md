@@ -29,11 +29,21 @@ VS Code with the Claude Code extension (for click-to-jump).
 
 - **Click a card** to jump to that conversation — focuses the VS Code window for
   that repo, then deep-links the session. Clicking a notification does the same.
+- **Orange cards say what Claude is blocked on** (e.g. *"Claude needs your
+  permission to use Bash"*), and their age is how long you've kept it waiting.
+  Left unanswered for 5 minutes, you get one follow-up ping.
+- **Working ages are true turn durations** (time since your prompt, not since
+  the last event), and the *finished* notification includes it (`Claude
+  finished · 12m`).
 - **Hover a card** to reveal a **✕** that removes just that chat (any status) —
   handy for sessions you opened and abandoned.
 - **✨** AI summaries · **🔔** notification pings · **🗑** clear idle/finished · **⏻** quit.
 - **Esc** closes the panel. **Right-click** the menu bar item for a native menu
   (clear / pause notifications / quit) without opening the panel.
+- **⌃⌥C** toggles the panel from anywhere (Carbon hotkey, no Accessibility
+  permission). Rebind with
+  `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` and
+  `… hotkeyModifiers -int <carbon mask>`, then relaunch.
 - Stale entries (no update in 24h) are pruned automatically.
 
 ## How it works
@@ -41,11 +51,12 @@ VS Code with the Claude Code extension (for click-to-jump).
 1. **Hooks** in `~/.claude/settings.json` run `update_status.py` on Claude Code
    lifecycle events (`SessionStart`, `UserPromptSubmit`, `PostToolUse`,
    `Notification`, `Stop`, `SessionEnd`), writing one JSON file per session to
-   `~/.claude/chat-status/`. `PostToolUse` flips a chat back to *working* the
-   moment an approved tool runs, so a card doesn't stay orange after you answer
-   a permission prompt. `repo`/`branch`/`cwd` are pinned on first sight, so a
-   chat stays attached to the window it opened in even if it later `cd`s
-   elsewhere.
+   `~/.claude/chat-status/`. `UserPromptSubmit` starts the turn clock;
+   `PostToolUse` flips a chat back to *working* the moment an approved tool
+   runs (without restarting the clock), so a card doesn't stay orange after you
+   answer a permission prompt; `Notification` records what Claude is waiting
+   on. `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays
+   attached to the window it opened in even if it later `cd`s elsewhere.
 2. **ChatStatus.app** (`ChatStatusBar.swift`) polls that directory every 2s,
    shows per-status counts in the menu bar, renders the dropdown, and fires a
    notification when a chat transitions to *needs you* or *finished*.

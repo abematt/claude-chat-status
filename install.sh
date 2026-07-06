@@ -48,7 +48,7 @@ tmp="$(mktemp)"
 jq \
     --arg start "$(guarded live)" \
     --arg prompt "$(guarded working)" \
-    --arg tool "$(guarded working)" \
+    --arg tool "$(guarded tool)" \
     --arg stop "$(guarded done)" \
     --arg end "$(guarded ended)" \
     --arg notify "$(guarded notify)" \

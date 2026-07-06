@@ -9,6 +9,7 @@
 // Build with build.sh; run `ChatStatus --dump` to print state without the GUI.
 
 import AppKit
+import Carbon.HIToolbox
 import UserNotifications
 import FoundationModels
 
@@ -27,10 +28,19 @@ struct Chat {
     let status: String
     let title: String
     let lastPrompt: String
+    let waitingOn: String     // what Claude is blocked on (Notification message)
+    let turnStartedAt: Date?  // stamped by UserPromptSubmit; survives tool events
     let updatedAt: Date
 
     // Text to summarize: what the chat is doing now (latest prompt), else its name.
     var summarySource: String { lastPrompt.isEmpty ? title : lastPrompt }
+
+    // Working cards age from the turn's start (tool events keep updated_at
+    // fresh, so it would always read "now"); others from the last event —
+    // which for needs_input is how long you've kept Claude waiting.
+    var activityDate: Date {
+        status == "working" ? (turnStartedAt ?? updatedAt) : updatedAt
+    }
 }
 
 let statusDir = FileManager.default.homeDirectoryForCurrentUser
@@ -107,6 +117,8 @@ func loadChats() -> [Chat] {
             status: status,
             title: (obj["title"] as? String) ?? (obj["last_prompt"] as? String) ?? "",
             lastPrompt: (obj["last_prompt"] as? String) ?? "",
+            waitingOn: (obj["waiting_on"] as? String) ?? "",
+            turnStartedAt: (obj["turn_started_at"] as? Double).map { Date(timeIntervalSince1970: $0) },
             updatedAt: updated
         ))
     }
@@ -188,7 +200,10 @@ final class ChatCardView: NSView {
         let titleW = cardW - 41
         let name = titleText.isEmpty ? Self.displayName(chat) : titleText
         let textH = Self.titleHeight(name, width: titleW)
-        let cardH = textH + 34
+        // Orange cards get an extra line saying what Claude is blocked on.
+        let waiting = chat.status == "needs_input" ? chat.waitingOn : ""
+        let waitH: CGFloat = waiting.isEmpty ? 0 : 17
+        let cardH = textH + waitH + 34
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: cardH + 4))
         card.frame = NSRect(x: 6, y: 2, width: cardW, height: cardH)
         card.wantsLayer = true
@@ -218,7 +233,7 @@ final class ChatCardView: NSView {
         repo.frame = NSRect(x: 29, y: cardH - 24, width: cardW - 145, height: 16)
         card.addSubview(repo)
 
-        meta.stringValue = "\(label(for: chat.status)) · \(age(chat.updatedAt))"
+        meta.stringValue = "\(label(for: chat.status)) · \(age(chat.activityDate))"
         meta.font = .systemFont(ofSize: 11)
         meta.textColor = chat.status == "needs_input" ? .systemOrange : .secondaryLabelColor
         meta.alignment = .right
@@ -238,6 +253,15 @@ final class ChatCardView: NSView {
         deleteBtn.frame = NSRect(x: cardW - 34, y: cardH - 27, width: 22, height: 22)
         deleteBtn.isHidden = true
         card.addSubview(deleteBtn)
+
+        if !waiting.isEmpty {
+            let w = NSTextField(labelWithString: waiting)
+            w.font = .systemFont(ofSize: 11)
+            w.textColor = .systemOrange
+            w.lineBreakMode = .byTruncatingTail
+            w.frame = NSRect(x: 29, y: 8 + textH + 3, width: titleW, height: 14)
+            card.addSubview(w)
+        }
 
         let primary = NSTextField(wrappingLabelWithString: name)
         primary.font = Self.titleFont
@@ -287,6 +311,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var lastStatuses: [String: String] = [:]
     var firstPoll = true
     var nativeNotifications = false
+    var hotKeyRef: EventHotKeyRef?
+
+    // One follow-up ping per stretch of needs_input, so a missed banner
+    // doesn't leave Claude hanging indefinitely. Reset when the chat moves on.
+    var nagged: Set<String> = []
+    let nagAfter: TimeInterval = 5 * 60
 
     let panelWidth: CGFloat = 420
     var panel: NSPanel!
@@ -400,6 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             FMEngine.shared.prewarm()
         }
 
+        registerHotkey()
         loadSummaryCache()
         poll()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -430,10 +461,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 if chat.status == "needs_input" {
                     notify(chat: chat, headline: "Claude needs your input")
                 } else if chat.status == "done" && prev == "working" {
-                    notify(chat: chat, headline: "Claude finished")
+                    var headline = "Claude finished"
+                    if let t = chat.turnStartedAt {
+                        let m = Int(chat.updatedAt.timeIntervalSince(t)) / 60
+                        if m >= 1 { headline += " · \(m < 60 ? "\(m)m" : "\(m / 60)h \(m % 60)m")" }
+                    }
+                    notify(chat: chat, headline: headline)
+                }
+            }
+            // Nag: still needs_input after nagAfter with no reaction -> one more ping.
+            for chat in chats where chat.status == "needs_input" {
+                if Date().timeIntervalSince(chat.updatedAt) > nagAfter,
+                   !nagged.contains(chat.sessionId) {
+                    nagged.insert(chat.sessionId)
+                    notify(chat: chat, headline: "Still waiting on you · \(age(chat.updatedAt))")
                 }
             }
         }
+        for chat in chats where chat.status != "needs_input" { nagged.remove(chat.sessionId) }
+        nagged.formIntersection(live)
         lastStatuses = Dictionary(uniqueKeysWithValues: chats.map { ($0.sessionId, $0.status) })
         firstPoll = false
         updateTitle()
@@ -449,7 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func fingerprint() -> String {
-        chats.map { "\($0.sessionId)|\($0.status)|\(age($0.updatedAt))|\($0.title)" }
+        chats.map { "\($0.sessionId)|\($0.status)|\(age($0.activityDate))|\($0.title)|\($0.waitingOn)" }
             .joined(separator: "\n")
     }
 
@@ -498,6 +544,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         if panel.isVisible { hidePanel() } else { showPanel() }
+    }
+
+    // Global hotkey (default ⌃⌥C) toggles the panel from anywhere. Carbon
+    // hotkeys work without the Accessibility permission a global key monitor
+    // would need. Rebind via:
+    //   defaults write com.measure.chatstatus hotkeyKeyCode -int <keycode>
+    //   defaults write com.measure.chatstatus hotkeyModifiers -int <carbon mask>
+    func registerHotkey() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+            DispatchQueue.main.async {
+                guard let d = NSApp.delegate as? AppDelegate else { return }
+                if d.panel.isVisible { d.hidePanel() } else { d.showPanel() }
+            }
+            return noErr
+        }, 1, &eventType, nil, nil)
+        let defaults = UserDefaults.standard
+        let key = (defaults.object(forKey: "hotkeyKeyCode") as? NSNumber)?.uint32Value
+            ?? UInt32(kVK_ANSI_C)
+        let mods = (defaults.object(forKey: "hotkeyModifiers") as? NSNumber)?.uint32Value
+            ?? UInt32(controlKey | optionKey)
+        let hkid = EventHotKeyID(signature: OSType(0x43485354), id: 1)  // 'CHST'
+        RegisterEventHotKey(key, mods, hkid, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
     // Right-click on the status item: a small native menu, so quit / clear /
@@ -707,10 +777,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSApp.terminate(nil)
     }
 
-    // Rich notification: headline, repo as subtitle, AI summary (or title) as body.
-    // Clicking it jumps to the chat. osascript fallback if not authorized.
+    // Rich notification: headline, repo as subtitle, what Claude is blocked on
+    // (else AI summary / title) as body. Clicking it jumps to the chat.
+    // osascript fallback if not authorized.
     func notify(chat: Chat, headline: String) {
-        let body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
+        var body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
+        if chat.status == "needs_input", !chat.waitingOn.isEmpty { body = chat.waitingOn }
         if nativeNotifications {
             let content = UNMutableNotificationContent()
             content.title = headline
@@ -749,7 +821,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 if CommandLine.arguments.contains("--dump") {
     for c in loadChats() {
-        print("\(c.status)\t\(c.repo)\t\(c.branch)\t\(age(c.updatedAt))\t\(c.title)")
+        var line = "\(c.status)\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
+        if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
+        print(line)
     }
     exit(0)
 }
