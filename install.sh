@@ -49,6 +49,10 @@ jq \
     --arg start "$(guarded live)" \
     --arg prompt "$(guarded working)" \
     --arg tool "$(guarded tool)" \
+    --arg tfail "$(guarded toolfail)" \
+    --arg perm "$(guarded permission)" \
+    --arg q "$(guarded question)" \
+    --arg err "$(guarded error)" \
     --arg stop "$(guarded done)" \
     --arg end "$(guarded ended)" \
     --arg notify "$(guarded notify)" \
@@ -58,12 +62,21 @@ jq \
     def strip: map(.hooks |= map(select((.command // "") | contains($h) | not)))
              | map(select(.hooks | length > 0));
     def add($cmd): . + [{"hooks":[{"type":"command","command":$cmd,"timeout":5}]}];
+    def addm($cmd; $m): . + [{"matcher": $m, "hooks":[{"type":"command","command":$cmd,"timeout":5}]}];
     .hooks //= {}
     | .hooks.SessionStart     = ((.hooks.SessionStart // [])     | strip | add($start))
     | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | strip | add($prompt))
     # PostToolUse flips needs_input back to working the moment an approved tool
     # runs, instead of the card staying orange until the turn ends.
     | .hooks.PostToolUse      = ((.hooks.PostToolUse // [])      | strip | add($tool))
+    # Failed tools keep a fail_streak so the app can flag a struggling chat.
+    | .hooks.PostToolUseFailure = ((.hooks.PostToolUseFailure // []) | strip | add($tfail))
+    # PermissionRequest carries the exact tool + arguments being asked about.
+    | .hooks.PermissionRequest  = ((.hooks.PermissionRequest // [])  | strip | add($perm))
+    # AskUserQuestion = Claude asked you a question (matcher scopes to that tool).
+    | .hooks.PreToolUse         = ((.hooks.PreToolUse // [])         | strip | addm($q; "AskUserQuestion"))
+    # StopFailure fires instead of Stop when the turn dies on an API error.
+    | .hooks.StopFailure        = ((.hooks.StopFailure // [])        | strip | add($err))
     | .hooks.Stop             = ((.hooks.Stop // [])             | strip | add($stop))
     | .hooks.SessionEnd       = ((.hooks.SessionEnd // [])       | strip | add($end))
     | .hooks.Notification     = ((.hooks.Notification // [])     | strip | add($notify))

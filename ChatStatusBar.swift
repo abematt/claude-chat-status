@@ -28,7 +28,10 @@ struct Chat {
     let status: String
     let title: String
     let lastPrompt: String
-    let waitingOn: String     // what Claude is blocked on (Notification message)
+    let waitingOn: String     // what Claude is blocked on (exact tool/question/message)
+    let waitingKind: String   // permission | reply | question | mcp | ""
+    let errorType: String     // StopFailure error_type when status == "error"
+    let failStreak: Int       // consecutive failed tool calls this turn
     let turnStartedAt: Date?  // stamped by UserPromptSubmit; survives tool events
     let updatedAt: Date
 
@@ -118,14 +121,17 @@ func loadChats() -> [Chat] {
             title: (obj["title"] as? String) ?? (obj["last_prompt"] as? String) ?? "",
             lastPrompt: (obj["last_prompt"] as? String) ?? "",
             waitingOn: (obj["waiting_on"] as? String) ?? "",
+            waitingKind: (obj["waiting_kind"] as? String) ?? "",
+            errorType: (obj["error_type"] as? String) ?? "",
+            failStreak: (obj["fail_streak"] as? Int) ?? 0,
             turnStartedAt: (obj["turn_started_at"] as? Double).map { Date(timeIntervalSince1970: $0) },
             updatedAt: updated
         ))
     }
-    let order = ["needs_input": 0, "working": 1, "live": 2, "done": 3]
+    let order = ["needs_input": 0, "error": 1, "working": 2, "live": 3, "done": 4]
     chats.sort {
-        let a = order[$0.status] ?? 4
-        let b = order[$1.status] ?? 4
+        let a = order[$0.status] ?? 5
+        let b = order[$1.status] ?? 5
         if a != b { return a < b }
         return $0.updatedAt > $1.updatedAt
     }
@@ -136,17 +142,42 @@ func dotColor(for status: String) -> NSColor {
     switch status {
     case "working": return .systemGreen
     case "needs_input": return .systemOrange
+    case "error": return .systemRed
     default: return .systemGray
     }
 }
 
-func label(for status: String) -> String {
-    switch status {
+func label(for chat: Chat) -> String {
+    switch chat.status {
     case "working": return "working"
-    case "needs_input": return "needs you"
+    case "needs_input":
+        switch chat.waitingKind {
+        case "permission": return "needs permission"
+        case "question": return "needs an answer"
+        case "reply": return "waiting on you"
+        case "mcp": return "MCP form"
+        default: return "needs you"
+        }
+    case "error": return "errored"
     case "done": return "finished"
     case "live": return "idle"
-    default: return status
+    default: return chat.status
+    }
+}
+
+// Human text for a StopFailure error_type.
+func errorText(_ type: String) -> String {
+    switch type {
+    case "rate_limit": return "Rate limited"
+    case "overloaded": return "API overloaded"
+    case "authentication_failed": return "Auth failed — run /login"
+    case "oauth_org_not_allowed": return "Org not allowed"
+    case "billing_error": return "Billing error"
+    case "invalid_request": return "Invalid request"
+    case "model_not_found": return "Model not found"
+    case "server_error": return "API server error"
+    case "max_output_tokens": return "Hit max output tokens"
+    default: return type.isEmpty ? "API error" : type.replacingOccurrences(of: "_", with: " ")
     }
 }
 
@@ -200,9 +231,19 @@ final class ChatCardView: NSView {
         let titleW = cardW - 41
         let name = titleText.isEmpty ? Self.displayName(chat) : titleText
         let textH = Self.titleHeight(name, width: titleW)
-        // Orange cards get an extra line saying what Claude is blocked on.
-        let waiting = chat.status == "needs_input" ? chat.waitingOn : ""
-        let waitH: CGFloat = waiting.isEmpty ? 0 : 17
+        // Detail line: what Claude is blocked on (orange), the API error that
+        // killed the turn (red), or a tool-failure streak while working (orange).
+        var detail = ""
+        var detailColor = NSColor.systemOrange
+        if chat.status == "needs_input" {
+            detail = chat.waitingOn
+        } else if chat.status == "error" {
+            detail = errorText(chat.errorType)
+            detailColor = .systemRed
+        } else if chat.status == "working" && chat.failStreak >= 3 {
+            detail = "\(chat.failStreak) tool failures in a row"
+        }
+        let waitH: CGFloat = detail.isEmpty ? 0 : 17
         let cardH = textH + waitH + 34
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: cardH + 4))
         card.frame = NSRect(x: 6, y: 2, width: cardW, height: cardH)
@@ -233,9 +274,10 @@ final class ChatCardView: NSView {
         repo.frame = NSRect(x: 29, y: cardH - 24, width: cardW - 145, height: 16)
         card.addSubview(repo)
 
-        meta.stringValue = "\(label(for: chat.status)) · \(age(chat.activityDate))"
+        meta.stringValue = "\(label(for: chat)) · \(age(chat.activityDate))"
         meta.font = .systemFont(ofSize: 11)
-        meta.textColor = chat.status == "needs_input" ? .systemOrange : .secondaryLabelColor
+        meta.textColor = chat.status == "needs_input" ? .systemOrange
+            : chat.status == "error" ? .systemRed : .secondaryLabelColor
         meta.alignment = .right
         meta.frame = NSRect(x: cardW - 112, y: cardH - 24, width: 100, height: 16)
         card.addSubview(meta)
@@ -254,10 +296,10 @@ final class ChatCardView: NSView {
         deleteBtn.isHidden = true
         card.addSubview(deleteBtn)
 
-        if !waiting.isEmpty {
-            let w = NSTextField(labelWithString: waiting)
+        if !detail.isEmpty {
+            let w = NSTextField(labelWithString: detail)
             w.font = .systemFont(ofSize: 11)
-            w.textColor = .systemOrange
+            w.textColor = detailColor
             w.lineBreakMode = .byTruncatingTail
             w.frame = NSRect(x: 29, y: 8 + textH + 3, width: titleW, height: 14)
             card.addSubview(w)
@@ -459,7 +501,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 let prev = lastStatuses[chat.sessionId]
                 guard prev != chat.status else { continue }
                 if chat.status == "needs_input" {
-                    notify(chat: chat, headline: "Claude needs your input")
+                    let headline: String
+                    switch chat.waitingKind {
+                    case "permission": headline = "Claude needs permission"
+                    case "question": headline = "Claude has a question"
+                    case "reply": headline = "Claude is waiting on you"
+                    default: headline = "Claude needs your input"
+                    }
+                    notify(chat: chat, headline: headline)
+                } else if chat.status == "error" {
+                    notify(chat: chat, headline: "Claude hit an error")
                 } else if chat.status == "done" && prev == "working" {
                     var headline = "Claude finished"
                     if let t = chat.turnStartedAt {
@@ -495,8 +546,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func fingerprint() -> String {
-        chats.map { "\($0.sessionId)|\($0.status)|\(age($0.activityDate))|\($0.title)|\($0.waitingOn)" }
-            .joined(separator: "\n")
+        chats.map {
+            "\($0.sessionId)|\($0.status)|\(age($0.activityDate))|\($0.title)|" +
+            "\($0.waitingOn)|\($0.waitingKind)|\($0.errorType)|\($0.failStreak)"
+        }.joined(separator: "\n")
     }
 
     // Compact native-looking title: small colored dot + count per status,
@@ -520,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             ]))
         }
         segment(counts["needs_input"] ?? 0, .systemOrange)
+        segment(counts["error"] ?? 0, .systemRed)
         segment(counts["working"] ?? 0, .systemGreen)
         segment(idle, .tertiaryLabelColor)
         if s.length > 0 {
@@ -783,6 +837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func notify(chat: Chat, headline: String) {
         var body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
         if chat.status == "needs_input", !chat.waitingOn.isEmpty { body = chat.waitingOn }
+        if chat.status == "error" { body = errorText(chat.errorType) }
         if nativeNotifications {
             let content = UNMutableNotificationContent()
             content.title = headline
@@ -821,8 +876,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 if CommandLine.arguments.contains("--dump") {
     for c in loadChats() {
-        var line = "\(c.status)\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
+        var line = "\(label(for: c))\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
+        if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
+        if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
         print(line)
     }
     exit(0)

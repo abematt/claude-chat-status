@@ -29,9 +29,15 @@ VS Code with the Claude Code extension (for click-to-jump).
 
 - **Click a card** to jump to that conversation — focuses the VS Code window for
   that repo, then deep-links the session. Clicking a notification does the same.
-- **Orange cards say what Claude is blocked on** (e.g. *"Claude needs your
-  permission to use Bash"*), and their age is how long you've kept it waiting.
-  Left unanswered for 5 minutes, you get one follow-up ping.
+- **Orange cards say exactly what Claude is blocked on** — the precise command
+  awaiting permission (``needs permission · Bash: git push origin main``), the
+  question it asked (*needs an answer*), or an idle wait (*waiting on you*) —
+  and their age is how long you've kept it waiting. Left unanswered for
+  5 minutes, you get one follow-up ping.
+- **Red cards are dead turns**: an API error (rate limit, overload, auth, max
+  tokens) kills a turn without a normal finish; the card shows *errored* with
+  the cause instead of pretending to work forever. A working card that racks up
+  3+ consecutive tool failures gets flagged too.
 - **Working ages are true turn durations** (time since your prompt, not since
   the last event), and the *finished* notification includes it (`Claude
   finished · 12m`).
@@ -49,19 +55,33 @@ VS Code with the Claude Code extension (for click-to-jump).
 ## How it works
 
 1. **Hooks** in `~/.claude/settings.json` run `update_status.py` on Claude Code
-   lifecycle events (`SessionStart`, `UserPromptSubmit`, `PostToolUse`,
-   `Notification`, `Stop`, `SessionEnd`), writing one JSON file per session to
-   `~/.claude/chat-status/`. `UserPromptSubmit` starts the turn clock;
-   `PostToolUse` flips a chat back to *working* the moment an approved tool
-   runs (without restarting the clock), so a card doesn't stay orange after you
-   answer a permission prompt; `Notification` records what Claude is waiting
-   on. `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays
-   attached to the window it opened in even if it later `cd`s elsewhere.
+   lifecycle events, writing one JSON file per session to
+   `~/.claude/chat-status/`:
+
+   | Hook event | Effect |
+   |---|---|
+   | `SessionStart` | card appears (*idle*) |
+   | `UserPromptSubmit` | *working*; starts the turn clock; clears waiting/error |
+   | `PostToolUse` | back to *working* (answered prompts stop being orange); clock keeps running |
+   | `PostToolUseFailure` | bumps a fail streak (3+ flags the card) |
+   | `PermissionRequest` | *needs permission* + the exact tool/command asked about |
+   | `PreToolUse` (matcher `AskUserQuestion`) | *needs an answer* + the question |
+   | `Notification` | *needs you*, labeled by `notification_type` (permission / idle / MCP form); informational types ignored |
+   | `StopFailure` | *errored* + error type — `Stop` never fires on API errors, so without this the chat would look busy forever |
+   | `Stop` | *finished* |
+   | `SessionEnd` | card removed |
+
+   `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays attached to
+   the window it opened in even if it later `cd`s elsewhere.
 2. **ChatStatus.app** (`ChatStatusBar.swift`) polls that directory every 2s,
    shows per-status counts in the menu bar, renders the dropdown, and fires a
-   notification when a chat transitions to *needs you* or *finished*.
+   notification when a chat transitions to *needs you*, *errored*, or *finished*.
 
-Statuses: orange `needs_input` · green `working` · gray `done` / `live` (idle).
+Statuses: orange `needs_input` · red `error` · green `working` · gray `done` /
+`live` (idle).
+
+Debugging: `touch ~/.claude/chat-status/.debug` appends every raw hook payload
+to `~/.claude/chat-status/_debug.jsonl`; remove the file to stop.
 
 ## AI summaries (optional, macOS 26+)
 
