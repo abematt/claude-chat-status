@@ -23,7 +23,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         tmp="$(mktemp)"
         jq --arg h "update_status.py" '
             .hooks |= with_entries(
-                .value |= map(.hooks |= map(select((.command // "") | contains($h) | not)))
+                .value |= (map(.hooks |= map(select((.command // "") | contains($h) | not)))
+                           | map(select(.hooks | length > 0)))
             )' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
         echo "Removed chat-status hooks from $SETTINGS"
     fi
@@ -51,8 +52,10 @@ jq \
     --arg end "$(guarded ended)" \
     --arg notify "$(guarded notify)" \
     --arg h "update_status.py" '
-    # Drop any prior chat-status hooks first so re-running never duplicates.
-    def strip: map(.hooks |= map(select((.command // "") | contains($h) | not)));
+    # Drop any prior chat-status hooks first so re-running never duplicates,
+    # and discard hook-groups left empty by that removal.
+    def strip: map(.hooks |= map(select((.command // "") | contains($h) | not)))
+             | map(select(.hooks | length > 0));
     def add($cmd): . + [{"hooks":[{"type":"command","command":$cmd,"timeout":5}]}];
     .hooks //= {}
     | .hooks.SessionStart     = ((.hooks.SessionStart // [])     | strip | add($start))
