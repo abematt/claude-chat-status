@@ -41,11 +41,12 @@ VS Code with the Claude Code extension (for click-to-jump).
 - **Working ages are true turn durations** (time since your prompt, not since
   the last event), and the *finished* notification includes it (`Claude
   finished · 12m`).
-- **Hover a card** to reveal **🏷 tag** and **✕ remove**. Tag adds your own
-  label as a chip next to the repo name (Enter saves, Esc cancels, empty
-  removes) — the automatic title/AI summary stays untouched. Tags survive
-  relaunches and show in notification subtitles. Remove kills just that chat
-  (any status) — handy for sessions you opened and abandoned.
+- **Hover a card** to reveal **✎ rename** and **✕ remove**. Rename replaces
+  the repo·branch name with your own label for that chat, edited inline with
+  explicit **✓ save / ✗ cancel** (Enter/Esc work too); saving empty reverts to
+  repo·branch. Labels survive relaunches and become the notification subtitle.
+  The title line (AI summary / latest prompt) is never touched. Remove kills
+  just that chat (any status) — handy for sessions you opened and abandoned.
 - **✨** AI summaries · **🔔** notification pings · **🗑** clear idle/finished · **⏻** quit.
 - **Esc** closes the panel. **Right-click** the menu bar item for a native menu
   (clear / pause notifications / quit) without opening the panel.

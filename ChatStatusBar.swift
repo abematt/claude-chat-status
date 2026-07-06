@@ -196,21 +196,27 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-// One dropdown card. Top row: colored status dot, repo name (+ branch), an
-// optional user tag chip, status word + age. Below: the chat title, wrapping
-// up to 3 lines across the card. Hovering swaps the status text for a tag 🏷
-// and a remove ✕. Tagging edits inline over the top row: Enter saves, Esc
-// cancels, empty removes the tag. The auto title/AI summary is never touched.
+// One dropdown card. Top row: colored status dot, the card's name — the
+// user's label if they set one, else repo (+ branch) — and status word + age.
+// Below: the chat title, wrapping up to 3 lines across the card.
+// Hovering swaps the status text for edit ✎ and remove ✕. Editing happens
+// inline over the name with explicit ✓ save / ✗ cancel (Enter/Esc work too);
+// saving empty reverts to repo (+ branch).
 final class ChatCardView: NSView, NSTextFieldDelegate {
     private let card = NSView()
     private let meta = NSTextField(labelWithString: "")
     private let deleteBtn = NSButton()
-    private let tagBtn = NSButton()
+    private let editBtn = NSButton()
+    private let saveBtn = NSButton()
+    private let cancelBtn = NSButton()
+    private var nameField: NSTextField!
     private var editor: NSTextField?
-    private var currentTag = ""
+    private var currentLabel = ""
+    private var namePlaceholder = ""
+    private var isHovering = false
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
-    var onTag: ((String) -> Void)?
+    var onLabel: ((String) -> Void)?
     private let baseColor = NSColor.labelColor.withAlphaComponent(0.055)
     private let hoverColor = NSColor.labelColor.withAlphaComponent(0.12)
 
@@ -232,7 +238,7 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         return min(ceil(rect.height), lineHeight * maxLines)
     }
 
-    init(chat: Chat, width: CGFloat, titleText: String, tag: String) {
+    init(chat: Chat, width: CGFloat, titleText: String, userLabel: String) {
         let cardW = width - 12
         let titleW = cardW - 41
         let name = titleText.isEmpty ? Self.displayName(chat) : titleText
@@ -274,34 +280,22 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
                 .foregroundColor: NSColor.tertiaryLabelColor,
             ]))
         }
-        // Repo (+branch) label, then the user's tag chip; both share the row's
-        // left region, with the repo truncating to make room for the chip.
-        currentTag = tag
-        let rowAvail = cardW - 145
-        let chipFont = NSFont.systemFont(ofSize: 10, weight: .medium)
-        let chipW: CGFloat = tag.isEmpty ? 0
-            : min(ceil((tag as NSString).size(withAttributes: [.font: chipFont]).width) + 14, 120)
-        let repoW = tag.isEmpty ? rowAvail
-            : min(ceil(repoText.size().width) + 2, rowAvail - chipW - 6)
-
-        let repo = NSTextField(labelWithString: "")
-        repo.attributedStringValue = repoText
-        repo.lineBreakMode = .byTruncatingTail
-        repo.frame = NSRect(x: 29, y: cardH - 24, width: repoW, height: 16)
-        card.addSubview(repo)
-
-        if !tag.isEmpty {
-            let chip = NSTextField(labelWithString: tag)
-            chip.font = chipFont
-            chip.textColor = .controlAccentColor
-            chip.alignment = .center
-            chip.lineBreakMode = .byTruncatingTail
-            chip.wantsLayer = true
-            chip.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
-            chip.layer?.cornerRadius = 7.5
-            chip.frame = NSRect(x: 29 + repoW + 6, y: cardH - 23.5, width: chipW, height: 15)
-            card.addSubview(chip)
+        // The card's name: the user's label when set (their chosen identity
+        // for this chat, shown in primary color), else repo (+ branch).
+        currentLabel = userLabel
+        namePlaceholder = chat.repo
+        let cardName = NSTextField(labelWithString: "")
+        if userLabel.isEmpty {
+            cardName.attributedStringValue = repoText
+        } else {
+            cardName.stringValue = userLabel
+            cardName.font = .systemFont(ofSize: 11, weight: .semibold)
+            cardName.textColor = .labelColor
         }
+        cardName.lineBreakMode = .byTruncatingTail
+        cardName.frame = NSRect(x: 29, y: cardH - 24, width: cardW - 145, height: 16)
+        card.addSubview(cardName)
+        nameField = cardName
 
         meta.stringValue = "\(label(for: chat)) · \(age(chat.activityDate))"
         meta.font = .systemFont(ofSize: 11)
@@ -311,32 +305,30 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         meta.frame = NSRect(x: cardW - 112, y: cardH - 24, width: 100, height: 16)
         card.addSubview(meta)
 
-        // Shown in the meta text's place while hovering: rename ✎ and remove ✕
-        // (the latter deletes this chat's status file whatever its status —
-        // the way to kill one stale entry).
-        deleteBtn.image = NSImage(systemSymbolName: "xmark.circle.fill",
-                                  accessibilityDescription: "Remove")
-        deleteBtn.isBordered = false
-        deleteBtn.imagePosition = .imageOnly
-        deleteBtn.contentTintColor = .tertiaryLabelColor
-        deleteBtn.target = self
-        deleteBtn.action = #selector(deleteClicked)
-        deleteBtn.toolTip = "Remove from list"
-        deleteBtn.frame = NSRect(x: cardW - 34, y: cardH - 27, width: 22, height: 22)
-        deleteBtn.isHidden = true
-        card.addSubview(deleteBtn)
-
-        tagBtn.image = NSImage(systemSymbolName: "tag",
-                               accessibilityDescription: "Tag")
-        tagBtn.isBordered = false
-        tagBtn.imagePosition = .imageOnly
-        tagBtn.contentTintColor = .tertiaryLabelColor
-        tagBtn.target = self
-        tagBtn.action = #selector(tagClicked)
-        tagBtn.toolTip = "Tag this chat (empty removes the tag)"
-        tagBtn.frame = NSRect(x: cardW - 58, y: cardH - 27, width: 22, height: 22)
-        tagBtn.isHidden = true
-        card.addSubview(tagBtn)
+        // Hover shows edit ✎ + remove ✕ in the meta text's place; while
+        // editing they become cancel ✗ + save ✓. All refuse first-responder
+        // status, so clicking them never ends the field edit prematurely.
+        func chrome(_ b: NSButton, _ symbol: String, _ tip: String, _ action: Selector,
+                    _ x: CGFloat, tint: NSColor = .tertiaryLabelColor) {
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+            b.isBordered = false
+            b.imagePosition = .imageOnly
+            b.contentTintColor = tint
+            b.target = self
+            b.action = action
+            b.toolTip = tip
+            b.frame = NSRect(x: x, y: cardH - 27, width: 22, height: 22)
+            b.isHidden = true
+            card.addSubview(b)
+        }
+        chrome(deleteBtn, "xmark.circle.fill", "Remove from list",
+               #selector(deleteClicked), cardW - 34)
+        chrome(editBtn, "pencil", "Rename (empty reverts to repo)",
+               #selector(editClicked), cardW - 58)
+        chrome(saveBtn, "checkmark.circle.fill", "Save",
+               #selector(saveClicked), cardW - 34, tint: .controlAccentColor)
+        chrome(cancelBtn, "xmark.circle", "Cancel",
+               #selector(cancelClicked), cardW - 58)
 
         if !detail.isEmpty {
             let w = NSTextField(labelWithString: detail)
@@ -368,18 +360,26 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         ))
     }
 
+    // One place decides what's visible for the current (hover, editing) state.
+    private func refreshChrome() {
+        let editing = editor != nil
+        meta.isHidden = editing || isHovering
+        editBtn.isHidden = editing || !isHovering
+        deleteBtn.isHidden = editing || !isHovering
+        saveBtn.isHidden = !editing
+        cancelBtn.isHidden = !editing
+    }
+
     override func mouseEntered(with event: NSEvent) {
+        isHovering = true
         card.layer?.backgroundColor = hoverColor.cgColor
-        meta.isHidden = true
-        deleteBtn.isHidden = false
-        tagBtn.isHidden = false
+        refreshChrome()
     }
 
     override func mouseExited(with event: NSEvent) {
-        card.layer?.backgroundColor = baseColor.cgColor
-        meta.isHidden = false
-        deleteBtn.isHidden = true
-        tagBtn.isHidden = true
+        isHovering = false
+        card.layer?.backgroundColor = editor == nil ? baseColor.cgColor : hoverColor.cgColor
+        refreshChrome()
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -391,47 +391,54 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         onDelete?()
     }
 
-    // --- Inline tag editing ---------------------------------------------
+    // --- Inline rename ----------------------------------------------------
+    // ✎ swaps the name for a text field over the same spot; ✓/Enter saves,
+    // ✗/Esc cancels. The placeholder shows what an empty save reverts to.
 
-    @objc private func tagClicked() {
+    @objc private func editClicked() {
         guard editor == nil else { return }
-        // Editor sits over the top row (where the chip lives), leaving the
-        // title below visible — you're labeling the chat, not renaming it.
-        let e = NSTextField(frame: NSRect(x: 29, y: card.frame.height - 28,
-                                          width: card.frame.width - 29 - 64, height: 21))
-        e.stringValue = currentTag
-        e.placeholderString = "tag"
-        e.font = .systemFont(ofSize: 11)
+        let e = NSTextField(frame: NSRect(x: 27, y: card.frame.height - 28.5,
+                                          width: card.frame.width - 27 - 64, height: 21))
+        e.stringValue = currentLabel
+        e.placeholderString = namePlaceholder
+        e.font = .systemFont(ofSize: 11, weight: .semibold)
         e.delegate = self
         e.focusRingType = .none
         card.addSubview(e)
+        nameField.isHidden = true
         editor = e
+        refreshChrome()
         window?.makeKey()
         window?.makeFirstResponder(e)
     }
 
+    @objc private func saveClicked() { commitEdit() }
+    @objc private func cancelClicked() { cancelEdit() }
+
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
-        if sel == #selector(NSResponder.insertNewline(_:)) { commitTag(); return true }
-        if sel == #selector(NSResponder.cancelOperation(_:)) { endTagEdit(); return true }
+        if sel == #selector(NSResponder.insertNewline(_:)) { commitEdit(); return true }
+        if sel == #selector(NSResponder.cancelOperation(_:)) { cancelEdit(); return true }
         return false
     }
 
-    // Clicking away also commits (covers ending the edit without Enter).
-    func controlTextDidEndEditing(_ obj: Notification) {
-        commitTag()
-    }
-
-    private func commitTag() {
+    private func commitEdit() {
         guard let e = editor else { return }
         let text = e.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        endTagEdit()
-        if text != currentTag { onTag?(text) }
+        teardownEditor()
+        if text != currentLabel { onLabel?(text) }
     }
 
-    private func endTagEdit() {
-        editor?.delegate = nil
-        editor?.removeFromSuperview()
-        editor = nil
+    private func cancelEdit() {
+        teardownEditor()
+    }
+
+    private func teardownEditor() {
+        guard let e = editor else { return }
+        editor = nil          // nil first: end-editing side effects become no-ops
+        e.delegate = nil
+        e.removeFromSuperview()
+        nameField.isHidden = false
+        refreshChrome()
     }
 }
 
@@ -478,16 +485,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UserDefaults.standard.set(d, forKey: "summaries")
     }
 
-    // User tags, keyed by session — a chip next to the repo name. Kept
-    // app-side (not in the status files) so hook writes can never clobber them.
-    var tags: [String: String] = [:]
+    // User labels, keyed by session — replace repo (+ branch) as the card's
+    // name when set. Kept app-side (not in the status files) so hook writes
+    // can never clobber them.
+    var labels: [String: String] = [:]
 
-    func loadTags() {
-        tags = (UserDefaults.standard.dictionary(forKey: "tags") as? [String: String]) ?? [:]
+    func loadLabels() {
+        labels = (UserDefaults.standard.dictionary(forKey: "labels") as? [String: String]) ?? [:]
     }
 
-    func saveTags() {
-        UserDefaults.standard.set(tags, forKey: "tags")
+    func saveLabels() {
+        UserDefaults.standard.set(labels, forKey: "labels")
     }
 
     var notificationsEnabled: Bool {
@@ -575,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         registerHotkey()
         loadSummaryCache()
-        loadTags()
+        loadLabels()
         poll()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
@@ -598,9 +606,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let before = summaryCache.count
         summaryCache = summaryCache.filter { live.contains($0.key) }
         if summaryCache.count != before { saveSummaryCache() }
-        let tagsBefore = tags.count
-        tags = tags.filter { live.contains($0.key) }
-        if tags.count != tagsBefore { saveTags() }
+        let labelsBefore = labels.count
+        labels = labels.filter { live.contains($0.key) }
+        if labels.count != labelsBefore { saveLabels() }
         if notificationsEnabled && !firstPoll {
             for chat in chats {
                 let prev = lastStatuses[chat.sessionId]
@@ -640,8 +648,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         firstPoll = false
         updateTitle()
         // Live-refresh the panel while it's open, but only when content changed
-        // (a rebuild resets hover state, so don't do it for nothing).
-        if panel.isVisible {
+        // (a rebuild resets hover state, so don't do it for nothing) — and
+        // never out from under an active inline rename.
+        if panel.isVisible, !(panel.firstResponder is NSTextView) {
             let fp = fingerprint()
             if fp != panelFingerprint {
                 refreshPanel()
@@ -817,7 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         for chat in chats {
             let card = ChatCardView(chat: chat, width: W - 20,
                                     titleText: summaryText(for: chat) ?? "",
-                                    tag: tags[chat.sessionId] ?? "")
+                                    userLabel: labels[chat.sessionId] ?? "")
             card.setFrameOrigin(NSPoint(x: 10, y: y))
             card.toolTip = chat.cwd
             card.onClick = { [weak self] in
@@ -831,14 +840,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 // and repositions the open panel.
                 self?.poll()
             }
-            card.onTag = { [weak self] tag in
+            card.onLabel = { [weak self] label in
                 guard let self else { return }
-                if tag.isEmpty {
-                    self.tags.removeValue(forKey: chat.sessionId)
+                if label.isEmpty {
+                    self.labels.removeValue(forKey: chat.sessionId)
                 } else {
-                    self.tags[chat.sessionId] = tag
+                    self.labels[chat.sessionId] = label
                 }
-                self.saveTags()
+                self.saveLabels()
                 self.refreshPanel()
                 self.positionPanel()
             }
@@ -960,7 +969,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         var body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
         if chat.status == "needs_input", !chat.waitingOn.isEmpty { body = chat.waitingOn }
         if chat.status == "error" { body = errorText(chat.errorType) }
-        let subtitle = tags[chat.sessionId].map { "\(chat.repo) · \($0)" } ?? chat.repo
+        // The user's label is the chat's chosen identity — use it in pings too.
+        let subtitle = labels[chat.sessionId] ?? chat.repo
         if nativeNotifications {
             let content = UNMutableNotificationContent()
             content.title = headline
@@ -998,10 +1008,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 }
 
 if CommandLine.arguments.contains("--dump") {
-    let tags = (UserDefaults.standard.dictionary(forKey: "tags") as? [String: String]) ?? [:]
+    let labels = (UserDefaults.standard.dictionary(forKey: "labels") as? [String: String]) ?? [:]
     for c in loadChats() {
-        var line = "\(label(for: c))\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
-        if let t = tags[c.sessionId] { line += "\t#\(t)" }
+        var line = "\(label(for: c))\t\(labels[c.sessionId] ?? c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
