@@ -41,13 +41,10 @@ def main():
         return
 
     if status == "notify":
-        # Notification fires for permission prompts and for idle waits.
-        # Only permission prompts mean "needs you"; idle waits keep prior status.
-        message = (payload.get("message") or "").lower()
-        if "permission" in message:
-            status = "needs_input"
-        else:
-            return
+        # Claude Code's Notification hook fires only to get your attention:
+        # permission prompts, and idle waits (~60s sitting on a question/input).
+        # Both mean "needs you", so any notification flips the chat to needs_input.
+        status = "needs_input"
 
     # Merge with the existing entry so fields like title survive status-only updates.
     entry = {}
