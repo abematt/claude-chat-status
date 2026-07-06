@@ -4,6 +4,7 @@
 Registered in ~/.claude/settings.json for these hook events:
     SessionStart      -> live
     UserPromptSubmit  -> working
+    PostToolUse       -> working (clears needs_input once an approved tool runs)
     Notification      -> notify (mapped to needs_input for permission prompts)
     Stop              -> done
     SessionEnd        -> ended (removes the status file)
@@ -92,7 +93,9 @@ def main():
         if not entry.get("title"):
             entry["title"] = prompt[:80]
 
-    tmp = path + ".tmp"
+    # PID-unique tmp name: hook events can fire concurrently for one session,
+    # and two writers sharing a tmp path could replace with mixed content.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(entry, f)
     os.replace(tmp, path)

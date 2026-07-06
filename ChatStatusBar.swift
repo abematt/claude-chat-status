@@ -36,6 +36,14 @@ struct Chat {
 let statusDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".claude/chat-status")
 
+// FNV-1a. Stable across launches (String.hashValue is per-process seeded), so
+// the persisted summary cache survives an app relaunch.
+func stableHash(_ s: String) -> UInt64 {
+    var h: UInt64 = 0xcbf29ce484222325
+    for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+    return h
+}
+
 // Wraps Apple's on-device model (macOS 26+). Isolated in an availability-gated
 // class so FoundationModels types never leak into the rest of the app.
 @available(macOS 26.0, *)
@@ -47,6 +55,9 @@ final class FMEngine {
         trailing punctuation, no preamble.
         """
     private let options = GenerationOptions(maximumResponseTokens: 16)
+    // Never used to generate: each summary gets its own session so chats don't
+    // share transcript context. Holding one prewarmed session keeps the model
+    // assets resident, which is what makes fresh sessions fast (~0.5s vs ~4s).
     private var warm: LanguageModelSession?
 
     var available: Bool {
@@ -136,11 +147,21 @@ func age(_ date: Date) -> String {
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
-// One dropdown card. Top row: colored status dot, repo name, status word + age.
-// Below: the chat title, wrapping up to 3 lines across the full card width.
+// Borderless panels refuse key status by default; the dropdown needs it so the
+// local event monitor sees Esc.
+final class KeyPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+// One dropdown card. Top row: colored status dot, repo name (+ branch), status
+// word + age. Below: the chat title, wrapping up to 3 lines across the card.
+// Hovering swaps the status text for a ✕ that removes just this chat.
 final class ChatCardView: NSView {
     private let card = NSView()
+    private let meta = NSTextField(labelWithString: "")
+    private let deleteBtn = NSButton()
     var onClick: (() -> Void)?
+    var onDelete: (() -> Void)?
     private let baseColor = NSColor.labelColor.withAlphaComponent(0.055)
     private let hoverColor = NSColor.labelColor.withAlphaComponent(0.12)
 
@@ -181,19 +202,42 @@ final class ChatCardView: NSView {
         dot.layer?.backgroundColor = dotColor(for: chat.status).cgColor
         card.addSubview(dot)
 
-        let repo = NSTextField(labelWithString: chat.repo)
-        repo.font = .systemFont(ofSize: 11, weight: .semibold)
-        repo.textColor = .secondaryLabelColor
+        let repoText = NSMutableAttributedString(string: chat.repo, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        if !chat.branch.isEmpty {
+            repoText.append(NSAttributedString(string: "  \(chat.branch)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+        }
+        let repo = NSTextField(labelWithString: "")
+        repo.attributedStringValue = repoText
         repo.lineBreakMode = .byTruncatingTail
         repo.frame = NSRect(x: 29, y: cardH - 24, width: cardW - 145, height: 16)
         card.addSubview(repo)
 
-        let meta = NSTextField(labelWithString: "\(label(for: chat.status)) · \(age(chat.updatedAt))")
+        meta.stringValue = "\(label(for: chat.status)) · \(age(chat.updatedAt))"
         meta.font = .systemFont(ofSize: 11)
         meta.textColor = chat.status == "needs_input" ? .systemOrange : .secondaryLabelColor
         meta.alignment = .right
         meta.frame = NSRect(x: cardW - 112, y: cardH - 24, width: 100, height: 16)
         card.addSubview(meta)
+
+        // Shown in the meta text's place while hovering; removes this chat's
+        // status file whatever its status — the way to kill one stale entry.
+        deleteBtn.image = NSImage(systemSymbolName: "xmark.circle.fill",
+                                  accessibilityDescription: "Remove")
+        deleteBtn.isBordered = false
+        deleteBtn.imagePosition = .imageOnly
+        deleteBtn.contentTintColor = .tertiaryLabelColor
+        deleteBtn.target = self
+        deleteBtn.action = #selector(deleteClicked)
+        deleteBtn.toolTip = "Remove from list"
+        deleteBtn.frame = NSRect(x: cardW - 34, y: cardH - 27, width: 22, height: 22)
+        deleteBtn.isHidden = true
+        card.addSubview(deleteBtn)
 
         let primary = NSTextField(wrappingLabelWithString: name)
         primary.font = Self.titleFont
@@ -218,14 +262,22 @@ final class ChatCardView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         card.layer?.backgroundColor = hoverColor.cgColor
+        meta.isHidden = true
+        deleteBtn.isHidden = false
     }
 
     override func mouseExited(with event: NSEvent) {
         card.layer?.backgroundColor = baseColor.cgColor
+        meta.isHidden = false
+        deleteBtn.isHidden = true
     }
 
     override func mouseUp(with event: NSEvent) {
         onClick?()
+    }
+
+    @objc private func deleteClicked() {
+        onDelete?()
     }
 }
 
@@ -241,11 +293,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var panelHeight: CGFloat = 0
     var panelFingerprint = ""
     var clickMonitor: Any?
+    var keyMonitor: Any?
 
     // On-device AI one-line summaries, keyed by session. Cache stores the
     // source-text hash so a summary is recomputed only when the prompt changes.
-    var summaryCache: [String: (hash: Int, text: String)] = [:]
+    // Persisted to UserDefaults so a relaunch doesn't re-summarize every chat.
+    var summaryCache: [String: (hash: UInt64, text: String)] = [:]
     var summaryInFlight: Set<String> = []
+
+    func loadSummaryCache() {
+        guard let d = UserDefaults.standard.dictionary(forKey: "summaries")
+                as? [String: [String: String]] else { return }
+        for (sid, v) in d {
+            if let hs = v["h"], let h = UInt64(hs), let t = v["t"] {
+                summaryCache[sid] = (h, t)
+            }
+        }
+    }
+
+    func saveSummaryCache() {
+        var d: [String: [String: String]] = [:]
+        // Hash as a string: plists can't hold the upper half of UInt64.
+        for (sid, v) in summaryCache { d[sid] = ["h": String(v.hash), "t": v.text] }
+        UserDefaults.standard.set(d, forKey: "summaries")
+    }
 
     var notificationsEnabled: Bool {
         get { !UserDefaults.standard.bool(forKey: "notificationsPaused") }
@@ -267,20 +338,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // Kick off a summary for a chat if enabled, available, and its prompt changed.
     func ensureSummary(for chat: Chat) {
         guard summariesEnabled, summariesAvailable else { return }
+        // Must precede the in-flight insert: bailing after it would strand the
+        // key in summaryInFlight and block that session's summaries forever.
+        guard #available(macOS 26.0, *) else { return }
         let text = chat.summarySource
         guard !text.isEmpty else { return }
         let key = chat.sessionId
-        let h = text.hashValue
+        let h = stableHash(text)
         if let c = summaryCache[key], c.hash == h { return }
         if summaryInFlight.contains(key) { return }
         summaryInFlight.insert(key)
-        guard #available(macOS 26.0, *) else { return }
         Task {
             let result = await FMEngine.shared.summarize(text)
             await MainActor.run {
                 self.summaryInFlight.remove(key)
                 if let r = result, !r.isEmpty {
                     self.summaryCache[key] = (h, r)
+                    self.saveSummaryCache()
                     if self.panel.isVisible { self.refreshPanel(); self.positionPanel() }
                 }
             }
@@ -303,9 +377,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: 100),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: true)
+        panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: 100),
+                         styleMask: [.borderless, .nonactivatingPanel],
+                         backing: .buffered, defer: true)
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -326,6 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             FMEngine.shared.prewarm()
         }
 
+        loadSummaryCache()
         poll()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
@@ -345,7 +420,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         for chat in chats { ensureSummary(for: chat) }
         // Drop cache entries for sessions that have ended.
         let live = Set(chats.map { $0.sessionId })
+        let before = summaryCache.count
         summaryCache = summaryCache.filter { live.contains($0.key) }
+        if summaryCache.count != before { saveSummaryCache() }
         if notificationsEnabled && !firstPoll {
             for chat in chats {
                 let prev = lastStatuses[chat.sessionId]
@@ -415,24 +492,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // --- Custom dropdown panel (frosted, rounded, non-native) ---
 
     @objc func togglePanel() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            hidePanel()
+            showContextMenu()
+            return
+        }
         if panel.isVisible { hidePanel() } else { showPanel() }
+    }
+
+    // Right-click on the status item: a small native menu, so quit / clear /
+    // notification toggles are reachable without opening the panel.
+    func showContextMenu() {
+        let menu = NSMenu()
+        func item(_ title: String, _ action: Selector) {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            i.target = self
+            menu.addItem(i)
+        }
+        item("Clear Finished", #selector(clearFinished(_:)))
+        item(notificationsEnabled ? "Pause Notifications" : "Resume Notifications",
+             #selector(toggleNotifications(_:)))
+        if summariesAvailable {
+            item(summariesEnabled ? "Disable AI Summaries" : "Enable AI Summaries",
+                 #selector(toggleSummaries(_:)))
+        }
+        menu.addItem(.separator())
+        item("Quit ChatStatus", #selector(quitApp(_:)))
+        // Attach-click-detach: the standard trick for a status item that shows
+        // a panel on left-click but a real menu on right-click.
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
     }
 
     func showPanel() {
         chats = loadChats()
         refreshPanel()
         positionPanel()
-        panel.orderFrontRegardless()
+        // Key (not just front) so Esc reaches the monitor below; the
+        // .nonactivatingPanel style keeps our app from stealing activation.
+        panel.makeKeyAndOrderFront(nil)
         // Any click outside the app dismisses, like a menu would.
         clickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hidePanel()
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            if e.keyCode == 53 { self?.hidePanel(); return nil }  // Esc
+            return e
         }
     }
 
     func hidePanel() {
         panel.orderOut(nil)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
     }
 
     func headerButton(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
@@ -474,6 +588,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             card.onClick = { [weak self] in
                 self?.hidePanel()
                 self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId)
+            }
+            card.onDelete = { [weak self] in
+                try? FileManager.default.removeItem(
+                    at: statusDir.appendingPathComponent("\(chat.sessionId).json"))
+                // poll() reloads and, since the fingerprint changed, rebuilds
+                // and repositions the open panel.
+                self?.poll()
             }
             content.addSubview(card)
             y += card.frame.height + 4
@@ -604,6 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: " ")
         }
         let script = "display notification \"\(esc(body))\" with title \"\(esc(headline))\" subtitle \"\(esc(chat.repo))\" sound name \"Ping\""
         run("/usr/bin/osascript", ["-e", script])

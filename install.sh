@@ -48,6 +48,7 @@ tmp="$(mktemp)"
 jq \
     --arg start "$(guarded live)" \
     --arg prompt "$(guarded working)" \
+    --arg tool "$(guarded working)" \
     --arg stop "$(guarded done)" \
     --arg end "$(guarded ended)" \
     --arg notify "$(guarded notify)" \
@@ -60,6 +61,9 @@ jq \
     .hooks //= {}
     | .hooks.SessionStart     = ((.hooks.SessionStart // [])     | strip | add($start))
     | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | strip | add($prompt))
+    # PostToolUse flips needs_input back to working the moment an approved tool
+    # runs, instead of the card staying orange until the turn ends.
+    | .hooks.PostToolUse      = ((.hooks.PostToolUse // [])      | strip | add($tool))
     | .hooks.Stop             = ((.hooks.Stop // [])             | strip | add($stop))
     | .hooks.SessionEnd       = ((.hooks.SessionEnd // [])       | strip | add($end))
     | .hooks.Notification     = ((.hooks.Notification // [])     | strip | add($notify))

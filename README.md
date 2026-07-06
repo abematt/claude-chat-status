@@ -4,20 +4,11 @@ A macOS menu bar app that shows the live status of every Claude Code chat across
 all your repos — with click-to-jump routing and notifications when a chat
 finishes or needs your input.
 
-```
-menu bar:  ● 1  ● 2  ● 1          orange = needs you · green = working · gray = idle/done
-           ┌────────────────────────────────────────────────┐
-           │  Claude Chats                ✨  🔔  🗑  ⏻       │
-           ├────────────────────────────────────────────────┤
-           │  ● measure-web                   needs you · now │
-           │    Fixing the checkout redirect loop             │
-           │  ● measure-backend                 working · 2m  │
-           │    Refactoring sprint completion flow            │
-           └────────────────────────────────────────────────┘
-```
+<img src="docs/screenshot.png" alt="ChatStatus dropdown" width="560">
 
-Each chat is a card: repo, status + age, and a one-line description of what it's
-doing. The dropdown is a custom frosted panel with a header row of controls.
+The menu bar shows a dot + count per status (`● 1  ● 2  ● 1` — orange = needs
+you, green = working, gray = idle/done). Each chat is a card: repo + branch,
+status + age, and a one-line description of what it's doing.
 
 ## Install
 
@@ -38,16 +29,23 @@ VS Code with the Claude Code extension (for click-to-jump).
 
 - **Click a card** to jump to that conversation — focuses the VS Code window for
   that repo, then deep-links the session. Clicking a notification does the same.
+- **Hover a card** to reveal a **✕** that removes just that chat (any status) —
+  handy for sessions you opened and abandoned.
 - **✨** AI summaries · **🔔** notification pings · **🗑** clear idle/finished · **⏻** quit.
+- **Esc** closes the panel. **Right-click** the menu bar item for a native menu
+  (clear / pause notifications / quit) without opening the panel.
 - Stale entries (no update in 24h) are pruned automatically.
 
 ## How it works
 
 1. **Hooks** in `~/.claude/settings.json` run `update_status.py` on Claude Code
-   lifecycle events (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`,
-   `SessionEnd`), writing one JSON file per session to `~/.claude/chat-status/`.
-   `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays attached to
-   the window it opened in even if it later `cd`s elsewhere.
+   lifecycle events (`SessionStart`, `UserPromptSubmit`, `PostToolUse`,
+   `Notification`, `Stop`, `SessionEnd`), writing one JSON file per session to
+   `~/.claude/chat-status/`. `PostToolUse` flips a chat back to *working* the
+   moment an approved tool runs, so a card doesn't stay orange after you answer
+   a permission prompt. `repo`/`branch`/`cwd` are pinned on first sight, so a
+   chat stays attached to the window it opened in even if it later `cd`s
+   elsewhere.
 2. **ChatStatus.app** (`ChatStatusBar.swift`) polls that directory every 2s,
    shows per-status counts in the menu bar, renders the dropdown, and fires a
    notification when a chat transitions to *needs you* or *finished*.
@@ -59,8 +57,8 @@ Statuses: orange `needs_input` · green `working` · gray `done` / `live` (idle)
 When Apple's on-device Foundation Models framework is available (macOS 26+ with
 Apple Intelligence), each card's description is a ~6-word summary of the chat's
 latest prompt, generated locally — free, private, ~0.5s each after a one-time
-prewarm. Toggle with **✨**. Otherwise cards show the raw prompt and the button
-is hidden.
+prewarm. Summaries are cached across relaunches. Toggle with **✨**. Otherwise
+cards show the raw prompt and the button is hidden.
 
 ## Notes
 
