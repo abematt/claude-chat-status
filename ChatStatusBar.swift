@@ -198,13 +198,19 @@ final class KeyPanel: NSPanel {
 
 // One dropdown card. Top row: colored status dot, repo name (+ branch), status
 // word + age. Below: the chat title, wrapping up to 3 lines across the card.
-// Hovering swaps the status text for a ✕ that removes just this chat.
-final class ChatCardView: NSView {
+// Hovering swaps the status text for a rename ✎ and a remove ✕. Rename edits
+// the title inline: Enter saves, Esc cancels, empty resets to the auto name.
+final class ChatCardView: NSView, NSTextFieldDelegate {
     private let card = NSView()
     private let meta = NSTextField(labelWithString: "")
     private let deleteBtn = NSButton()
+    private let renameBtn = NSButton()
+    private var primary: NSTextField!
+    private var editor: NSTextField?
+    private var displayedTitle = ""
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onRename: ((String) -> Void)?
     private let baseColor = NSColor.labelColor.withAlphaComponent(0.055)
     private let hoverColor = NSColor.labelColor.withAlphaComponent(0.12)
 
@@ -282,8 +288,9 @@ final class ChatCardView: NSView {
         meta.frame = NSRect(x: cardW - 112, y: cardH - 24, width: 100, height: 16)
         card.addSubview(meta)
 
-        // Shown in the meta text's place while hovering; removes this chat's
-        // status file whatever its status — the way to kill one stale entry.
+        // Shown in the meta text's place while hovering: rename ✎ and remove ✕
+        // (the latter deletes this chat's status file whatever its status —
+        // the way to kill one stale entry).
         deleteBtn.image = NSImage(systemSymbolName: "xmark.circle.fill",
                                   accessibilityDescription: "Remove")
         deleteBtn.isBordered = false
@@ -296,6 +303,18 @@ final class ChatCardView: NSView {
         deleteBtn.isHidden = true
         card.addSubview(deleteBtn)
 
+        renameBtn.image = NSImage(systemSymbolName: "pencil",
+                                  accessibilityDescription: "Rename")
+        renameBtn.isBordered = false
+        renameBtn.imagePosition = .imageOnly
+        renameBtn.contentTintColor = .tertiaryLabelColor
+        renameBtn.target = self
+        renameBtn.action = #selector(renameClicked)
+        renameBtn.toolTip = "Rename (empty resets to the automatic name)"
+        renameBtn.frame = NSRect(x: cardW - 58, y: cardH - 27, width: 22, height: 22)
+        renameBtn.isHidden = true
+        card.addSubview(renameBtn)
+
         if !detail.isEmpty {
             let w = NSTextField(labelWithString: detail)
             w.font = .systemFont(ofSize: 11)
@@ -305,7 +324,8 @@ final class ChatCardView: NSView {
             card.addSubview(w)
         }
 
-        let primary = NSTextField(wrappingLabelWithString: name)
+        displayedTitle = name
+        primary = NSTextField(wrappingLabelWithString: name)
         primary.font = Self.titleFont
         primary.isSelectable = false
         primary.maximumNumberOfLines = Int(Self.maxLines)
@@ -330,20 +350,65 @@ final class ChatCardView: NSView {
         card.layer?.backgroundColor = hoverColor.cgColor
         meta.isHidden = true
         deleteBtn.isHidden = false
+        renameBtn.isHidden = false
     }
 
     override func mouseExited(with event: NSEvent) {
         card.layer?.backgroundColor = baseColor.cgColor
         meta.isHidden = false
         deleteBtn.isHidden = true
+        renameBtn.isHidden = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard editor == nil else { return }  // don't jump away mid-rename
         onClick?()
     }
 
     @objc private func deleteClicked() {
         onDelete?()
+    }
+
+    // --- Inline rename -------------------------------------------------
+
+    @objc private func renameClicked() {
+        guard editor == nil else { return }
+        let e = NSTextField(frame: NSRect(x: primary.frame.minX - 2, y: primary.frame.maxY - 22,
+                                          width: primary.frame.width, height: 20))
+        e.stringValue = displayedTitle
+        e.font = Self.titleFont
+        e.delegate = self
+        e.focusRingType = .none
+        card.addSubview(e)
+        primary.isHidden = true
+        editor = e
+        window?.makeKey()
+        window?.makeFirstResponder(e)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.insertNewline(_:)) { commitRename(); return true }
+        if sel == #selector(NSResponder.cancelOperation(_:)) { endRename(); return true }
+        return false
+    }
+
+    // Clicking away also commits (covers ending the edit without Enter).
+    func controlTextDidEndEditing(_ obj: Notification) {
+        commitRename()
+    }
+
+    private func commitRename() {
+        guard let e = editor else { return }
+        let text = e.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        endRename()
+        if text != displayedTitle { onRename?(text) }
+    }
+
+    private func endRename() {
+        editor?.delegate = nil
+        editor?.removeFromSuperview()
+        editor = nil
+        primary.isHidden = false
     }
 }
 
@@ -388,6 +453,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Hash as a string: plists can't hold the upper half of UInt64.
         for (sid, v) in summaryCache { d[sid] = ["h": String(v.hash), "t": v.text] }
         UserDefaults.standard.set(d, forKey: "summaries")
+    }
+
+    // User-chosen card names, keyed by session. Kept app-side (not in the
+    // status files) so concurrent hook writes can never clobber them.
+    var renames: [String: String] = [:]
+
+    func loadRenames() {
+        renames = (UserDefaults.standard.dictionary(forKey: "renames") as? [String: String]) ?? [:]
+    }
+
+    func saveRenames() {
+        UserDefaults.standard.set(renames, forKey: "renames")
     }
 
     var notificationsEnabled: Bool {
@@ -439,6 +516,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return summaryCache[chat.sessionId]?.text
     }
 
+    // Card title priority: user rename > AI summary > raw title/prompt (card fallback).
+    func cardTitle(for chat: Chat) -> String {
+        renames[chat.sessionId] ?? summaryText(for: chat) ?? ""
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // A ⌘-dragged-off status item is remembered as hidden across launches;
@@ -474,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         registerHotkey()
         loadSummaryCache()
+        loadRenames()
         poll()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
@@ -496,6 +579,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let before = summaryCache.count
         summaryCache = summaryCache.filter { live.contains($0.key) }
         if summaryCache.count != before { saveSummaryCache() }
+        let renamesBefore = renames.count
+        renames = renames.filter { live.contains($0.key) }
+        if renames.count != renamesBefore { saveRenames() }
         if notificationsEnabled && !firstPoll {
             for chat in chats {
                 let prev = lastStatuses[chat.sessionId]
@@ -662,7 +748,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.hidePanel()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            if e.keyCode == 53 { self?.hidePanel(); return nil }  // Esc
+            if e.keyCode == 53 {  // Esc
+                // Mid-rename, Esc belongs to the field editor (cancels the edit).
+                if self?.panel.firstResponder is NSTextView { return e }
+                self?.hidePanel()
+                return nil
+            }
             return e
         }
     }
@@ -706,7 +797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         for chat in chats {
             let card = ChatCardView(chat: chat, width: W - 20,
-                                    titleText: summaryText(for: chat) ?? "")
+                                    titleText: cardTitle(for: chat))
             card.setFrameOrigin(NSPoint(x: 10, y: y))
             card.toolTip = chat.cwd
             card.onClick = { [weak self] in
@@ -719,6 +810,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 // poll() reloads and, since the fingerprint changed, rebuilds
                 // and repositions the open panel.
                 self?.poll()
+            }
+            card.onRename = { [weak self] name in
+                guard let self else { return }
+                if name.isEmpty {
+                    self.renames.removeValue(forKey: chat.sessionId)
+                } else {
+                    self.renames[chat.sessionId] = name
+                }
+                self.saveRenames()
+                self.refreshPanel()
+                self.positionPanel()
             }
             content.addSubview(card)
             y += card.frame.height + 4
@@ -835,7 +937,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // (else AI summary / title) as body. Clicking it jumps to the chat.
     // osascript fallback if not authorized.
     func notify(chat: Chat, headline: String) {
-        var body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
+        var body = renames[chat.sessionId] ?? summaryText(for: chat)
+            ?? (chat.title.isEmpty ? chat.cwd : chat.title)
         if chat.status == "needs_input", !chat.waitingOn.isEmpty { body = chat.waitingOn }
         if chat.status == "error" { body = errorText(chat.errorType) }
         if nativeNotifications {
@@ -875,8 +978,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 }
 
 if CommandLine.arguments.contains("--dump") {
+    let renames = (UserDefaults.standard.dictionary(forKey: "renames") as? [String: String]) ?? [:]
     for c in loadChats() {
-        var line = "\(label(for: c))\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
+        var line = "\(label(for: c))\t\(c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(renames[c.sessionId] ?? c.title)"
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }

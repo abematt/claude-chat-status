@@ -41,8 +41,10 @@ VS Code with the Claude Code extension (for click-to-jump).
 - **Working ages are true turn durations** (time since your prompt, not since
   the last event), and the *finished* notification includes it (`Claude
   finished · 12m`).
-- **Hover a card** to reveal a **✕** that removes just that chat (any status) —
-  handy for sessions you opened and abandoned.
+- **Hover a card** to reveal **✎ rename** and **✕ remove**. Rename edits the
+  title inline (Enter saves, Esc cancels, empty resets to the automatic name);
+  your name wins over the AI summary and survives relaunches. Remove kills
+  just that chat (any status) — handy for sessions you opened and abandoned.
 - **✨** AI summaries · **🔔** notification pings · **🗑** clear idle/finished · **⏻** quit.
 - **Esc** closes the panel. **Right-click** the menu bar item for a native menu
   (clear / pause notifications / quit) without opening the panel.
