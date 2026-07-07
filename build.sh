@@ -34,7 +34,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>0.6.0</string>  <!-- keep in step with CHANGELOG.md; shown in the panel footer -->
     <key>LSUIElement</key>
     <true/>
 </dict>
