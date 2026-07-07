@@ -3,6 +3,19 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.7.0 — 2026-07-07
+
+Host-aware click routing — CLI chats stop opening VS Code.
+
+- The hook records where each session lives (`host`/`host_app`/`host_pid`) from its
+  process ancestry: VS Code, or a terminal app (iTerm, Terminal, Ghostty, tmux…).
+- Clicking a terminal-hosted card (or its notification) focuses that terminal app
+  instead of wrongly opening VS Code. App-level focus only — no tab/pane targeting,
+  and tmux-server sessions can't be focused (not a GUI app).
+- Terminal-hosted cards show their host app name next to repo · branch.
+- README redesign: centered hero + badges, glyph status table, mermaid data-flow
+  diagram, collapsible hook reference, fresh 0.6.0 screenshot.
+
 ## 0.6.0 — 2026-07-07
 
 Menu-style visual redesign and summary hardening.

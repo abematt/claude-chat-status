@@ -37,6 +37,9 @@ struct Chat {
     let updatedAt: Date
     let background: Bool      // turn ended but background tasks/crons still running
     let lastMessage: String   // Claude's closing message, set when a turn truly finishes
+    let host: String          // "vscode" (deep-linkable) | "terminal" | "" (pre-host files)
+    let hostApp: String       // terminal app name, e.g. "iTerm" / "Terminal" / "tmux"
+    let hostPid: Int          // terminal app PID, for focus-by-process on click
 
     // Text to summarize: what the chat is doing now (latest prompt), else its name.
     var summarySource: String { lastPrompt.isEmpty ? title : lastPrompt }
@@ -177,7 +180,10 @@ func loadChats() -> [Chat] {
             turnStartedAt: (obj["turn_started_at"] as? Double).map { Date(timeIntervalSince1970: $0) },
             updatedAt: updated,
             background: (obj["background"] as? Bool) ?? false,
-            lastMessage: (obj["last_message"] as? String) ?? ""
+            lastMessage: (obj["last_message"] as? String) ?? "",
+            host: (obj["host"] as? String) ?? "",
+            hostApp: (obj["host_app"] as? String) ?? "",
+            hostPid: (obj["host_pid"] as? Int) ?? 0
         ))
     }
     let order = ["needs_input": 0, "error": 1, "working": 2, "live": 3, "done": 4]
@@ -419,6 +425,16 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
                 .font: NSFont.systemFont(ofSize: 11),
                 .foregroundColor: NSColor.tertiaryLabelColor,
             ]))
+        }
+        // Terminal-hosted chats behave differently on click (focus the app,
+        // no deep link) — say where they live so that's not a surprise.
+        if chat.host == "terminal" {
+            repoText.append(NSAttributedString(
+                string: "  \(chat.hostApp.isEmpty ? "CLI" : chat.hostApp)", attributes: [
+                    .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .baselineOffset: 1,
+                ]))
         }
         // The card's name: the user's label when set (their chosen identity
         // for this chat, shown in primary color), else repo (+ branch).
@@ -1066,7 +1082,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             card.toolTip = chat.cwd
             card.onClick = { [weak self] in
                 self?.hidePanel()
-                self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId)
+                self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId,
+                              host: chat.host, hostPid: chat.hostPid)
             }
             card.onDelete = { [weak self] in
                 try? FileManager.default.removeItem(
@@ -1200,13 +1217,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                        display: true)
     }
 
-    // Routes to the exact conversation, in two steps:
+    // Routes a click to where the chat actually lives.
+    // Terminal-hosted chats (CLI in iTerm/Terminal/tmux…) just focus their
+    // host app by PID — opening VS Code for them was wrong. App-level only:
+    // no tab/pane focus, and a tmux server isn't a GUI app to activate.
+    // VS Code-hosted chats (and pre-host status files) go in two steps:
     // 1. Focus the VS Code window that has this repo's folder open (opens it if not).
     // 2. Deep-link the session via the extension's URI handler — focuses the chat tab
     //    if open, otherwise resumes the session in the now-focused window.
     // Both opens target VS Code by bundle id so they work regardless of where
     // the app lives (it's in ~/Downloads here, not /Applications).
-    func routeTo(cwd: String, sessionId: String) {
+    func routeTo(cwd: String, sessionId: String, host: String = "", hostPid: Int = 0) {
+        if host == "terminal" {
+            if hostPid > 0, let app = NSRunningApplication(processIdentifier: pid_t(hostPid)),
+               !app.isTerminated {
+                app.activate()
+            }
+            return
+        }
         if !cwd.isEmpty {
             run("/usr/bin/open", ["-b", "com.microsoft.VSCode", cwd])
         }
@@ -1272,7 +1300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             content.subtitle = subtitle
             content.body = body
             content.sound = .default
-            content.userInfo = ["cwd": chat.cwd, "sessionId": chat.sessionId]
+            content.userInfo = ["cwd": chat.cwd, "sessionId": chat.sessionId,
+                                "host": chat.host, "hostPid": chat.hostPid]
             // Session-keyed identifier: a chat has at most one live banner —
             // a new ping replaces the previous one, and poll() can withdraw
             // it by id once the state it announced is no longer true.
@@ -1294,7 +1323,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        routeTo(cwd: info["cwd"] as? String ?? "", sessionId: info["sessionId"] as? String ?? "")
+        routeTo(cwd: info["cwd"] as? String ?? "",
+                sessionId: info["sessionId"] as? String ?? "",
+                host: info["host"] as? String ?? "",
+                hostPid: info["hostPid"] as? Int ?? 0)
         completionHandler()
     }
 
@@ -1312,6 +1344,7 @@ if CommandLine.arguments.contains("--dump") {
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
+        if c.host == "terminal" { line += "\t[\(c.hostApp.isEmpty ? "cli" : c.hostApp)]" }
         if c.status == "done", !c.lastMessage.isEmpty { line += "\t[said: \(c.lastMessage)]" }
         print(line)
     }

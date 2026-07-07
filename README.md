@@ -30,11 +30,11 @@ The menu bar shows a count per status; the panel shows one card per chat — nam
 ./install.sh --uninstall  # remove hooks + login item
 ```
 
-Idempotent, clone-anywhere. Requires macOS, [`jq`](https://jqlang.github.io/jq/), and VS Code with the Claude Code extension (for click-to-jump).
+Idempotent, clone-anywhere. Requires macOS and [`jq`](https://jqlang.github.io/jq/); conversation deep-links need VS Code with the Claude Code extension (CLI chats in a terminal are tracked too, and clicks focus that terminal instead).
 
 ## Using it
 
-- **Click a card** (or its notification) → focuses that repo's VS Code window and deep-links the session via `vscode://anthropic.claude-code/open`.
+- **Click a card** (or its notification) → jumps to where the chat lives. VS Code chats focus that repo's window and deep-link the exact conversation via `vscode://anthropic.claude-code/open`; CLI chats focus their terminal app (marked on the card — app-level, no tab focus, and tmux-server sessions can't be focused).
 - **Notifications** fire on *needs you* / *errored* / *finished* — one live banner per chat, withdrawn automatically once you've answered or the state moves on. Left waiting 5 minutes, you get one follow-up ping.
 - **Hover a card** to rename (✎ — your label replaces repo · branch everywhere, including notifications) or remove (✕).
 - **A finish with background tasks still running isn't "finished"** — the card shows *background* and completes for real when the work stops.

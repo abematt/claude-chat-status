@@ -47,11 +47,20 @@ def clear_waiting(entry):
         entry.pop(k, None)
 
 
-def claude_pid():
-    """(pid, start_epoch) of the nearest ancestor that looks like the Claude
-    process. Lets the app reap sessions whose process died without a clean
-    SessionEnd (window closed, crash) instead of showing them working for the
-    24h prune; the start time guards against PID reuse."""
+def process_info():
+    """One walk up the hook's ancestry for two facts.
+
+    claude: (pid, start_epoch) of the nearest ancestor that looks like the
+    Claude process — lets the app reap sessions whose process died without a
+    clean SessionEnd (window closed, crash) instead of showing them working
+    for the 24h prune; the start time guards against PID reuse.
+
+    host: the topmost ancestor below launchd is the GUI app hosting the
+    session. VS Code-hosted chats can be deep-linked on click; anything else
+    (a terminal, a tmux server) is recorded as ("terminal", app name, pid)
+    so the app focuses that instead of wrongly opening VS Code."""
+    claude = None
+    host = None
     try:
         r = subprocess.run(
             ["ps", "-Axww", "-o", "pid=,ppid=,lstart=,command="],
@@ -64,19 +73,33 @@ def claude_pid():
             if len(parts) == 8:
                 procs[int(parts[0])] = (int(parts[1]), " ".join(parts[2:7]), parts[7])
         cur = os.getppid()
-        for _ in range(8):
+        top = None
+        for _ in range(25):
             if cur <= 1 or cur not in procs:
                 break
             ppid, lstart, cmd = procs[cur]
             # Our own hook chain (sh/python running this script) mentions
             # "claude" via the repo path — skip it, not match it.
-            if "claude" in cmd.lower() and "update_status.py" not in cmd:
+            if claude is None and "claude" in cmd.lower() and "update_status.py" not in cmd:
                 started = int(time.mktime(time.strptime(lstart, "%a %b %d %H:%M:%S %Y")))
-                return cur, started
+                claude = (cur, started)
+            top = (cur, cmd)
             cur = ppid
+        if top:
+            pid, cmd = top
+            low = cmd.lower()
+            if "visual studio code" in low or "code helper" in low:
+                host = ("vscode", "", 0)
+            elif ".app/" in cmd:
+                # App name from the bundle path: ".../iTerm.app/..." -> iTerm.
+                name = cmd.split(".app/")[0].rsplit("/", 1)[-1]
+                host = ("terminal", name, pid)
+            else:
+                # Bare binary (tmux server, sshd, ...) — first token's basename.
+                host = ("terminal", os.path.basename(cmd.split()[0]), pid)
     except Exception:
         pass
-    return None
+    return claude, host
 
 
 def has_background_work(payload):
@@ -214,12 +237,20 @@ def main():
 
     now = int(time.time())
 
-    # Session (re)starts and prompts re-pin the Claude PID: cheap, and a
-    # resumed session gets a fresh process the old pid would misrepresent.
+    # Session (re)starts and prompts re-pin the Claude PID and host app:
+    # cheap, and a resumed session gets a fresh process (and possibly a new
+    # host) the old values would misrepresent.
     if status in ("live", "working"):
-        info = claude_pid()
+        info, host = process_info()
         if info:
             entry["pid"], entry["pid_started_at"] = info
+        if host:
+            entry["host"] = host[0]
+            if host[0] == "terminal":
+                entry["host_app"], entry["host_pid"] = host[1], host[2]
+            else:
+                entry.pop("host_app", None)
+                entry.pop("host_pid", None)
 
     if status == "working":
         # A fresh user prompt starts a new turn; the app measures "working" age
