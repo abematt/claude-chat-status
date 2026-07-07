@@ -47,6 +47,85 @@ def clear_waiting(entry):
         entry.pop(k, None)
 
 
+def claude_pid():
+    """(pid, start_epoch) of the nearest ancestor that looks like the Claude
+    process. Lets the app reap sessions whose process died without a clean
+    SessionEnd (window closed, crash) instead of showing them working for the
+    24h prune; the start time guards against PID reuse."""
+    try:
+        r = subprocess.run(
+            ["ps", "-Axww", "-o", "pid=,ppid=,lstart=,command="],
+            capture_output=True, text=True, timeout=2,
+        )
+        procs = {}
+        for line in r.stdout.splitlines():
+            # pid, ppid, then lstart's 5 tokens ("Mon Jul  7 21:04:32 2026").
+            parts = line.split(None, 7)
+            if len(parts) == 8:
+                procs[int(parts[0])] = (int(parts[1]), " ".join(parts[2:7]), parts[7])
+        cur = os.getppid()
+        for _ in range(8):
+            if cur <= 1 or cur not in procs:
+                break
+            ppid, lstart, cmd = procs[cur]
+            # Our own hook chain (sh/python running this script) mentions
+            # "claude" via the repo path — skip it, not match it.
+            if "claude" in cmd.lower() and "update_status.py" not in cmd:
+                started = int(time.mktime(time.strptime(lstart, "%a %b %d %H:%M:%S %Y")))
+                return cur, started
+            cur = ppid
+    except Exception:
+        pass
+    return None
+
+
+def has_background_work(payload):
+    """Stop payloads (claude >= 2.1.145) list live background tasks/crons; a
+    turn that ends with any still running isn't finished."""
+    for key in ("background_tasks", "session_crons"):
+        for t in payload.get(key) or []:
+            if isinstance(t, dict) and t.get("status") == "running":
+                return True
+    return False
+
+
+def last_assistant_message(payload):
+    """Claude's closing message, for the finished notification/card: from the
+    Stop payload when present, else tail-parsed from the transcript JSONL."""
+    msg = payload.get("last_assistant_message")
+    if msg:
+        return " ".join(str(msg).split())
+    path = payload.get("transcript_path")
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+        for line in reversed(lines):
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") != "assistant":
+                continue
+            content = (obj.get("message") or {}).get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(b.get("text", "") for b in content
+                                if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                continue
+            text = " ".join(text.split())
+            if text:
+                return text
+    except Exception:
+        pass
+    return ""
+
+
 def describe_tool(payload):
     """One-line human summary of the tool call awaiting permission."""
     tool = payload.get("tool_name") or "a tool"
@@ -135,6 +214,13 @@ def main():
 
     now = int(time.time())
 
+    # Session (re)starts and prompts re-pin the Claude PID: cheap, and a
+    # resumed session gets a fresh process the old pid would misrepresent.
+    if status in ("live", "working"):
+        info = claude_pid()
+        if info:
+            entry["pid"], entry["pid_started_at"] = info
+
     if status == "working":
         # A fresh user prompt starts a new turn; the app measures "working" age
         # against this, not updated_at (which tool events keep refreshing).
@@ -142,13 +228,18 @@ def main():
         clear_waiting(entry)
         entry.pop("error_type", None)
         entry.pop("fail_streak", None)
+        entry.pop("background", None)
+        entry.pop("last_message", None)
     elif status == "tool":
         # Tool activity flips an answered permission prompt / question back to
         # working without restarting the turn clock; a success ends any streak.
+        # It also means the main loop is live again after a background-only
+        # stop, so the next Stop should re-evaluate background work fresh.
         status = "working"
         clear_waiting(entry)
         entry.pop("fail_streak", None)
         entry.pop("error_type", None)
+        entry.pop("background", None)
     elif status == "toolfail":
         # Still working, but count consecutive failures so the app can flag a
         # struggling chat. Reset by any successful tool / prompt / turn end.
@@ -176,6 +267,10 @@ def main():
         ntype = payload.get("notification_type") or ""
         if ntype in NOTIFY_IGNORE:
             return
+        # Claude's ~60s idle nag fires while background work is running; that
+        # isn't "waiting on you", so don't flip a background card orange.
+        if ntype == "idle_prompt" and entry.get("background"):
+            return
         status = "needs_input"
         entry["waiting_kind"] = NOTIFY_KIND.get(ntype, entry.get("waiting_kind") or "")
         msg = " ".join((payload.get("message") or "").split())
@@ -192,6 +287,17 @@ def main():
         clear_waiting(entry)
         entry.pop("fail_streak", None)
         entry.pop("error_type", None)
+        if has_background_work(payload):
+            # The turn ended but background tasks/crons are still running:
+            # not finished. Stay working (no "finished" ping); a later Stop
+            # with nothing running completes the card for real.
+            status = "working"
+            entry["background"] = True
+        else:
+            entry.pop("background", None)
+            msg = last_assistant_message(payload)
+            if msg:
+                entry["last_message"] = msg[:200]
 
     entry.update({
         "session_id": sid,

@@ -40,7 +40,16 @@ VS Code with the Claude Code extension (for click-to-jump).
   3+ consecutive tool failures gets flagged too.
 - **Working ages are true turn durations** (time since your prompt, not since
   the last event), and the *finished* notification includes it (`Claude
-  finished · 12m`).
+  finished · 12m`) with **Claude's closing message as the body** — finished
+  cards show it too, so you can triage without opening the chat.
+- **A turn that ends with background tasks still running isn't "finished"**:
+  the card shows *background* instead of pinging you, and completes for real
+  once the background work stops. Claude's idle nags during background work
+  are ignored.
+- **Banners don't outlive their state**: each chat keeps at most one live
+  notification, and answering a permission prompt in VS Code (or prompting a
+  finished chat again, or the session ending) withdraws it from Notification
+  Center instead of leaving it stale.
 - **Hover a card** to reveal **✎ rename** and **✕ remove**. Rename replaces
   the repo·branch name with your own label for that chat, edited inline with
   explicit **✓ save / ✗ cancel** (Enter/Esc work too); saving empty reverts to
@@ -54,7 +63,9 @@ VS Code with the Claude Code extension (for click-to-jump).
   permission). Rebind with
   `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` and
   `… hotkeyModifiers -int <carbon mask>`, then relaunch.
-- Stale entries (no update in 24h) are pruned automatically.
+- Chats whose Claude process died without a clean exit (window closed, crash)
+  are reaped within seconds — a PID + start-time check, so a recycled PID can't
+  fake a live session. Entries with no update in 24h are pruned as a fallback.
 
 ## How it works
 
@@ -72,11 +83,12 @@ VS Code with the Claude Code extension (for click-to-jump).
    | `PreToolUse` (matcher `AskUserQuestion`) | *needs an answer* + the question |
    | `Notification` | *needs you*, labeled by `notification_type` (permission / idle / MCP form); informational types ignored |
    | `StopFailure` | *errored* + error type — `Stop` never fires on API errors, so without this the chat would look busy forever |
-   | `Stop` | *finished* |
+   | `Stop` | *finished* + Claude's closing message — or stays *working* (labeled *background*) while background tasks/crons run |
    | `SessionEnd` | card removed |
 
    `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays attached to
-   the window it opened in even if it later `cd`s elsewhere.
+   the window it opened in even if it later `cd`s elsewhere. The Claude process
+   PID (+ start time) is pinned too, re-pinned on each prompt.
 2. **ChatStatus.app** (`ChatStatusBar.swift`) polls that directory every 2s,
    shows per-status counts in the menu bar, renders the dropdown, and fires a
    notification when a chat transitions to *needs you*, *errored*, or *finished*.

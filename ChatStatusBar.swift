@@ -10,6 +10,7 @@
 
 import AppKit
 import Carbon.HIToolbox
+import Darwin
 import UserNotifications
 import FoundationModels
 
@@ -34,6 +35,8 @@ struct Chat {
     let failStreak: Int       // consecutive failed tool calls this turn
     let turnStartedAt: Date?  // stamped by UserPromptSubmit; survives tool events
     let updatedAt: Date
+    let background: Bool      // turn ended but background tasks/crons still running
+    let lastMessage: String   // Claude's closing message, set when a turn truly finishes
 
     // Text to summarize: what the chat is doing now (latest prompt), else its name.
     var summarySource: String { lastPrompt.isEmpty ? title : lastPrompt }
@@ -55,6 +58,18 @@ func stableHash(_ s: String) -> UInt64 {
     var h: UInt64 = 0xcbf29ce484222325
     for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
     return h
+}
+
+// kill(0) says the PID exists; comparing the kernel's start time against the
+// one the hook stamped stops a recycled PID from faking a live session.
+// Unverifiable (no start time, proc_pidinfo refused) errs toward alive.
+func processAlive(_ pid: Int32, startedAt: Double) -> Bool {
+    if kill(pid, 0) != 0 && errno == ESRCH { return false }
+    guard startedAt > 0 else { return true }
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return true }
+    return abs(Double(info.pbi_start_tvsec) - startedAt) <= 5
 }
 
 // Wraps Apple's on-device model (macOS 26+). Isolated in an availability-gated
@@ -112,6 +127,14 @@ func loadChats() -> [Chat] {
             try? fm.removeItem(at: url)
             continue
         }
+        // Reap sessions whose Claude process died without a SessionEnd (window
+        // closed, crash) — otherwise they'd show "working" until the 24h prune.
+        // Entries without a pid (pre-feature) keep the prune as their fallback.
+        if let pid = obj["pid"] as? Int, pid > 0,
+           !processAlive(Int32(pid), startedAt: (obj["pid_started_at"] as? Double) ?? 0) {
+            try? fm.removeItem(at: url)
+            continue
+        }
         chats.append(Chat(
             sessionId: sid,
             repo: (obj["repo"] as? String) ?? "?",
@@ -125,7 +148,9 @@ func loadChats() -> [Chat] {
             errorType: (obj["error_type"] as? String) ?? "",
             failStreak: (obj["fail_streak"] as? Int) ?? 0,
             turnStartedAt: (obj["turn_started_at"] as? Double).map { Date(timeIntervalSince1970: $0) },
-            updatedAt: updated
+            updatedAt: updated,
+            background: (obj["background"] as? Bool) ?? false,
+            lastMessage: (obj["last_message"] as? String) ?? ""
         ))
     }
     let order = ["needs_input": 0, "error": 1, "working": 2, "live": 3, "done": 4]
@@ -149,7 +174,7 @@ func dotColor(for status: String) -> NSColor {
 
 func label(for chat: Chat) -> String {
     switch chat.status {
-    case "working": return "working"
+    case "working": return chat.background ? "background" : "working"
     case "needs_input":
         switch chat.waitingKind {
         case "permission": return "needs permission"
@@ -254,6 +279,10 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
             detailColor = .systemRed
         } else if chat.status == "working" && chat.failStreak >= 3 {
             detail = "\(chat.failStreak) tool failures in a row"
+        } else if chat.status == "done" && !chat.lastMessage.isEmpty {
+            // Claude's closing message: triage a finished chat from the card.
+            detail = chat.lastMessage
+            detailColor = .secondaryLabelColor
         }
         let waitH: CGFloat = detail.isEmpty ? 0 : 17
         let cardH = textH + waitH + 34
@@ -644,6 +673,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         for chat in chats where chat.status != "needs_input" { nagged.remove(chat.sessionId) }
         nagged.formIntersection(live)
+        // A banner only lives while its state is current: answering the
+        // permission prompt in VS Code, prompting again after a finish, or the
+        // session ending withdraws the stale notification instead of leaving
+        // it in Notification Center. (Runs even while pings are paused.)
+        var stale = chats.compactMap { chat -> String? in
+            guard let prev = lastStatuses[chat.sessionId], prev != chat.status,
+                  chat.status == "working" || chat.status == "live" else { return nil }
+            return "chat-\(chat.sessionId)"
+        }
+        stale += lastStatuses.keys.filter { !live.contains($0) }.map { "chat-\($0)" }
+        if !stale.isEmpty {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: stale)
+        }
         lastStatuses = Dictionary(uniqueKeysWithValues: chats.map { ($0.sessionId, $0.status) })
         firstPoll = false
         updateTitle()
@@ -662,7 +704,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func fingerprint() -> String {
         chats.map {
             "\($0.sessionId)|\($0.status)|\(age($0.activityDate))|\($0.title)|" +
-            "\($0.waitingOn)|\($0.waitingKind)|\($0.errorType)|\($0.failStreak)"
+            "\($0.waitingOn)|\($0.waitingKind)|\($0.errorType)|\($0.failStreak)|" +
+            "\($0.background)|\($0.lastMessage)"
         }.joined(separator: "\n")
     }
 
@@ -969,6 +1012,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         var body = summaryText(for: chat) ?? (chat.title.isEmpty ? chat.cwd : chat.title)
         if chat.status == "needs_input", !chat.waitingOn.isEmpty { body = chat.waitingOn }
         if chat.status == "error" { body = errorText(chat.errorType) }
+        // A finished ping shows Claude's conclusion, so it's triageable from
+        // the banner without opening the chat.
+        if chat.status == "done", !chat.lastMessage.isEmpty { body = chat.lastMessage }
         // The user's label is the chat's chosen identity — use it in pings too.
         let subtitle = labels[chat.sessionId] ?? chat.repo
         if nativeNotifications {
@@ -978,8 +1024,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             content.body = body
             content.sound = .default
             content.userInfo = ["cwd": chat.cwd, "sessionId": chat.sessionId]
+            // Session-keyed identifier: a chat has at most one live banner —
+            // a new ping replaces the previous one, and poll() can withdraw
+            // it by id once the state it announced is no longer true.
             UNUserNotificationCenter.current().add(UNNotificationRequest(
-                identifier: UUID().uuidString, content: content, trigger: nil))
+                identifier: "chat-\(chat.sessionId)", content: content, trigger: nil))
             return
         }
         func esc(_ s: String) -> String {
@@ -1014,6 +1063,7 @@ if CommandLine.arguments.contains("--dump") {
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
+        if c.status == "done", !c.lastMessage.isEmpty { line += "\t[said: \(c.lastMessage)]" }
         print(line)
     }
     exit(0)
