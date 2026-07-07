@@ -1,14 +1,26 @@
-# claude-chat-status
+<div align="center">
 
-A macOS menu bar app that shows the live status of every Claude Code chat across
-all your repos — with click-to-jump routing and notifications when a chat
-finishes or needs your input.
+# ChatStatus
 
-<img src="docs/screenshot.png" alt="ChatStatus dropdown" width="560">
+**Every Claude Code chat, live in your menu bar.**
 
-The menu bar shows a dot + count per status (`● 1  ● 2  ● 1` — orange = needs
-you, green = working, gray = idle/done). Each chat is a card: repo + branch,
-status + age, and a one-line description of what it's doing.
+One glance for what's working, what's blocked, what finished — one click to jump back into the exact conversation in VS Code.
+
+<img src="https://img.shields.io/github/v/tag/abematt/claude-chat-status?label=version&color=d97757" alt="version">&nbsp;<img src="https://img.shields.io/badge/platform-macOS-black" alt="macOS">&nbsp;<img src="https://img.shields.io/badge/AppKit-single%20file-F05138?logo=swift&logoColor=white" alt="Swift">&nbsp;<img src="https://img.shields.io/github/license/abematt/claude-chat-status?color=3da638" alt="license">
+
+<img src="docs/screenshot.png" alt="ChatStatus panel" width="560">
+
+</div>
+
+The menu bar shows a count per status; the panel shows one card per chat — name (AI-summarized), repo · branch, what it's blocked on, and a live turn clock.
+
+| | Status | Meaning |
+|:-:|---|---|
+| ✳ | **working** | animated Claude spark + `2m 52s` turn clock (true time since your prompt) |
+| ● | **needs you** | orange, with the exact blocker — `Bash: git push origin main`, or the question asked |
+| ● | **errored** | red, with the cause (rate limit, auth, overload…) — a dead turn never plays busy |
+| ✓ | **finished** | green, with Claude's closing message so you can triage without opening the chat |
+| ✳ | **idle** | dim — session open, nothing running |
 
 ## Install
 
@@ -18,101 +30,66 @@ status + age, and a one-line description of what it's doing.
 ./install.sh --uninstall  # remove hooks + login item
 ```
 
-Idempotent and location-independent — clone anywhere and run it. It patches
-`~/.claude/settings.json` with hooks guarded by a file-existence check, so a
-missing script no-ops rather than blocking Claude.
+Idempotent, clone-anywhere. Requires macOS, [`jq`](https://jqlang.github.io/jq/), and VS Code with the Claude Code extension (for click-to-jump).
 
-**Requires:** macOS · [`jq`](https://jqlang.github.io/jq/) (`brew install jq`) ·
-VS Code with the Claude Code extension (for click-to-jump).
+## Using it
 
-## Usage
+- **Click a card** (or its notification) → focuses that repo's VS Code window and deep-links the session via `vscode://anthropic.claude-code/open`.
+- **Notifications** fire on *needs you* / *errored* / *finished* — one live banner per chat, withdrawn automatically once you've answered or the state moves on. Left waiting 5 minutes, you get one follow-up ping.
+- **Hover a card** to rename (✎ — your label replaces repo · branch everywhere, including notifications) or remove (✕).
+- **A finish with background tasks still running isn't "finished"** — the card shows *background* and completes for real when the work stops.
+- **⌃⌥C** toggles the panel from anywhere · **Esc** closes it · **right-click** the menu bar item for a quick menu. Rebind the hotkey: `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` (+ `hotkeyModifiers`).
+- Chats whose Claude process died without a clean exit are reaped in seconds (PID + start-time check); anything silent for 24h is pruned.
 
-- **Click a card** to jump to that conversation — focuses the VS Code window for
-  that repo, then deep-links the session. Clicking a notification does the same.
-- **Orange cards say exactly what Claude is blocked on** — the precise command
-  awaiting permission (``needs permission · Bash: git push origin main``), the
-  question it asked (*needs an answer*), or an idle wait (*waiting on you*) —
-  and their age is how long you've kept it waiting. Left unanswered for
-  5 minutes, you get one follow-up ping.
-- **Red cards are dead turns**: an API error (rate limit, overload, auth, max
-  tokens) kills a turn without a normal finish; the card shows *errored* with
-  the cause instead of pretending to work forever. A working card that racks up
-  3+ consecutive tool failures gets flagged too.
-- **Working ages are true turn durations** (time since your prompt, not since
-  the last event), and the *finished* notification includes it (`Claude
-  finished · 12m`) with **Claude's closing message as the body** — finished
-  cards show it too, so you can triage without opening the chat.
-- **A turn that ends with background tasks still running isn't "finished"**:
-  the card shows *background* instead of pinging you, and completes for real
-  once the background work stops. Claude's idle nags during background work
-  are ignored.
-- **Banners don't outlive their state**: each chat keeps at most one live
-  notification, and answering a permission prompt in VS Code (or prompting a
-  finished chat again, or the session ending) withdraws it from Notification
-  Center instead of leaving it stale.
-- **Hover a card** to reveal **✎ rename** and **✕ remove**. Rename replaces
-  the repo·branch name with your own label for that chat, edited inline with
-  explicit **✓ save / ✗ cancel** (Enter/Esc work too); saving empty reverts to
-  repo·branch. Labels survive relaunches and become the notification subtitle.
-  The title line (AI summary / latest prompt) is never touched. Remove kills
-  just that chat (any status) — handy for sessions you opened and abandoned.
-- **✨** AI summaries · **🔔** notification pings · **🗑** clear idle/finished · **⏻** quit.
-- **Esc** closes the panel. **Right-click** the menu bar item for a native menu
-  (clear / pause notifications / quit) without opening the panel.
-- **⌃⌥C** toggles the panel from anywhere (Carbon hotkey, no Accessibility
-  permission). Rebind with
-  `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` and
-  `… hotkeyModifiers -int <carbon mask>`, then relaunch.
-- Chats whose Claude process died without a clean exit (window closed, crash)
-  are reaped within seconds — a PID + start-time check, so a recycled PID can't
-  fake a live session. Entries with no update in 24h are pruned as a fallback.
+> [!NOTE]
+> **AI summaries** (macOS 26+ with Apple Intelligence): card names become ~6-word on-device summaries of the chat's latest prompt — local, private, ~0.5s. Toggle in the panel's Options. Without the model, cards show the raw prompt.
 
 ## How it works
 
-1. **Hooks** in `~/.claude/settings.json` run `update_status.py` on Claude Code
-   lifecycle events, writing one JSON file per session to
-   `~/.claude/chat-status/`:
+```mermaid
+flowchart LR
+    A[Claude Code<br>lifecycle hooks] -->|"update_status.py &lt;event&gt;"| B[("~/.claude/chat-status/<br>&lt;session&gt;.json")]
+    B -->|2s poll| C[ChatStatus.app<br>menu bar · panel · notifications]
+    C -->|click| D[VS Code<br>session deep link]
+```
 
-   | Hook event | Effect |
-   |---|---|
-   | `SessionStart` | card appears (*idle*) |
-   | `UserPromptSubmit` | *working*; starts the turn clock; clears waiting/error |
-   | `PostToolUse` | back to *working* (answered prompts stop being orange); clock keeps running |
-   | `PostToolUseFailure` | bumps a fail streak (3+ flags the card) |
-   | `PermissionRequest` | *needs permission* + the exact tool/command asked about |
-   | `PreToolUse` (matcher `AskUserQuestion`) | *needs an answer* + the question |
-   | `Notification` | *needs you*, labeled by `notification_type` (permission / idle / MCP form); informational types ignored |
-   | `StopFailure` | *errored* + error type — `Stop` never fires on API errors, so without this the chat would look busy forever |
-   | `Stop` | *finished* + Claude's closing message — or stays *working* (labeled *background*) while background tasks/crons run |
-   | `SessionEnd` | card removed |
+Two components, connected only by JSON files on disk. `install.sh` patches the hooks into `~/.claude/settings.json`, guarded by a file-existence check so a moved clone no-ops instead of breaking Claude.
 
-   `repo`/`branch`/`cwd` are pinned on first sight, so a chat stays attached to
-   the window it opened in even if it later `cd`s elsewhere. The Claude process
-   PID (+ start time) is pinned too, re-pinned on each prompt.
-2. **ChatStatus.app** (`ChatStatusBar.swift`) polls that directory every 2s,
-   shows per-status counts in the menu bar, renders the dropdown, and fires a
-   notification when a chat transitions to *needs you*, *errored*, or *finished*.
+<details>
+<summary><b>Hook event → state mapping</b></summary>
+<br>
 
-Statuses: orange `needs_input` · red `error` · green `working` · gray `done` /
-`live` (idle).
+| Hook event | Effect |
+|---|---|
+| `SessionStart` | card appears (*idle*) |
+| `UserPromptSubmit` | *working*; starts the turn clock; clears waiting/error |
+| `PostToolUse` | back to *working* (answered prompts stop being orange) |
+| `PostToolUseFailure` | bumps a fail streak (3+ flags the card) |
+| `PermissionRequest` | *needs permission* + the exact tool/command |
+| `PreToolUse` (`AskUserQuestion`) | *needs an answer* + the question |
+| `Notification` | *needs you*, typed by `notification_type`; informational types ignored |
+| `StopFailure` | *errored* + error type — `Stop` never fires on API errors |
+| `Stop` | *finished* + closing message, or *background* while tasks/crons still run |
+| `SessionEnd` | card removed |
 
-Debugging: `touch ~/.claude/chat-status/.debug` appends every raw hook payload
-to `~/.claude/chat-status/_debug.jsonl`; remove the file to stop.
+`repo`/`branch`/`cwd` and the Claude PID are pinned on first sight — a chat stays attached to the window it opened in, and a recycled PID can't fake a live session.
 
-## AI summaries (optional, macOS 26+)
+</details>
 
-When Apple's on-device Foundation Models framework is available (macOS 26+ with
-Apple Intelligence), each card's description is a ~6-word summary of the chat's
-latest prompt, generated locally — free, private, ~0.5s each after a one-time
-prewarm. Summaries are cached across relaunches. Toggle with **✨**. Otherwise
-cards show the raw prompt and the button is hidden.
+## Debugging
 
-## Notes
+```bash
+./build/ChatStatus.app/Contents/MacOS/ChatStatus --dump   # parsed state, no GUI
+touch ~/.claude/chat-status/.debug                        # log raw hook payloads → _debug.jsonl
+```
 
-- Hooks are read at session start — chats opened *before* installing won't report
-  until their next session.
-- Claude Code's own `inputNeededNotifEnabled` is independent; disable one to avoid
-  double pings.
-- The app is ad-hoc signed. If notifications don't appear, enable them for
-  ChatStatus in System Settings → Notifications.
-- Debug without the GUI: `./build/ChatStatus.app/Contents/MacOS/ChatStatus --dump`
+> [!TIP]
+> Hooks are read at session start — chats opened before installing report from their next session. Claude Code's own `inputNeededNotifEnabled` is independent; disable one to avoid double pings. If notifications don't appear, allow ChatStatus in System Settings → Notifications (the app is ad-hoc signed).
+
+---
+
+<div align="center">
+
+[Changelog](CHANGELOG.md) · [MIT License](LICENSE)
+
+</div>
