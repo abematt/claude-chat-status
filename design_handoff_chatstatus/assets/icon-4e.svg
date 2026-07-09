@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#F5F0E5"></stop><stop offset="1" stop-color="#E4DAC6"></stop>
+    </linearGradient>
+    <radialGradient id="hl" cx="0.5" cy="-0.12" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"></stop><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </radialGradient>
+    <clipPath id="sq"><rect x="0" y="0" width="1024" height="1024" rx="229"></rect></clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="1024" fill="url(#bg)"></rect>
+    <rect width="1024" height="1024" fill="url(#hl)"></rect>
+    <g transform="translate(225.3,225.3) scale(44.108)">
+      <rect x="0" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="2" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="2" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="3" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="3" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="4" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="4" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="0" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="2" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="2" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="3" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="3" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="4" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="4" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="5" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="1" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="2" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="2" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="2" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="2" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="3" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="3" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="3" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="3" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="4" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="4" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="4" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="4" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="9" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="9" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="10" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="10" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="11" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="11" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="0" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="1" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="2" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="3" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="4" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="7" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="9" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="9" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="10" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="10" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="11" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="11" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="12" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+  <rect x="12" y="8" width="1.05" height="1.05" fill="#2B2620" shape-rendering="crispEdges"></rect>
+    </g>
+    <g transform="translate(546.6,-13.4) scale(27.286)">
+      <rect x="8" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="7" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="9" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="6" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="10" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="6" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="5" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="8" y="11" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="5" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="11" y="8" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="7" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="7" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="7" y="9" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="9" y="9" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="6" y="6" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="6" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="6" y="10" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+  <rect x="10" y="10" width="1.05" height="1.05" fill="#D97757" shape-rendering="crispEdges"></rect>
+    </g>
+  </g>
+</svg>

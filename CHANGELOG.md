@@ -3,6 +3,27 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.8.0 — 2026-07-09
+
+Pixel-mark redesign (design handoff 4e/4g) — new icon, glyph, and a
+hairline-row dropdown that adapts to light/dark.
+
+- App icon is now the "4e Cream" mark: a 2×2 grid of 8-bit window panes on a
+  cream squircle, the tracked (top-right) pane lit in clay with a pixel sunburst
+  on its corner — all drawn procedurally in `make-icon.swift`.
+- Menu-bar item leads with the panes mark (a template glyph, no lit pane), shown
+  only when everything is idle and hidden the moment there are counts to display.
+  Working chats keep the animated Claude spark (the CLI thinking glyphs cycled in
+  clay).
+- Dropdown reskinned from floating grey cards to a hairline-row panel (384 pt,
+  rounded, hairline border): SESSIONS/OPTIONS eyebrows, hairline-divided rows,
+  repo · branch + status meta on one line, the title below, and a blocker /
+  error / closing-message detail line.
+- Neutral scheme is black/white and follows the system light/dark; only the
+  status colors (clay working, orange needs-you, red error, green done, amber
+  clock) carry hue. Custom monochrome toggles replace NSSwitch so their on-color
+  doesn't pull in the system accent.
+
 ## 0.7.0 — 2026-07-07
 
 Host-aware click routing — CLI chats stop opening VS Code.

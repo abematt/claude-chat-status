@@ -196,15 +196,6 @@ func loadChats() -> [Chat] {
     return chats
 }
 
-func dotColor(for status: String) -> NSColor {
-    switch status {
-    case "working": return .systemGreen
-    case "needs_input": return .systemOrange
-    case "error": return .systemRed
-    default: return .systemGray
-    }
-}
-
 func label(for chat: Chat) -> String {
     switch chat.status {
     case "working": return chat.background ? "background" : "working"
@@ -254,24 +245,151 @@ func elapsed(_ from: Date) -> String {
     return "\(s / 3600)h \((s % 3600) / 60)m"
 }
 
+// Right-aligned row meta: the turn clock while working, else a status word
+// (with age for error/done so a glance says how stale it is).
+func metaText(for chat: Chat) -> String {
+    switch chat.status {
+    case "working": return chat.background ? "background" : elapsed(chat.activityDate)
+    case "error": return "errored · \(age(chat.activityDate))"
+    case "done": return "finished · \(age(chat.activityDate))"
+    case "live": return "idle"
+    default: return label(for: chat)  // "needs you" / "needs permission" / …
+    }
+}
+
+// nil means "neutral" — the caller fills in the theme's muted tone.
+func metaColor(for chat: Chat) -> NSColor? {
+    switch chat.status {
+    case "working": return Palette.clock
+    case "needs_input": return Palette.needs
+    case "error": return Palette.errorDot
+    case "done": return Palette.done
+    default: return nil
+    }
+}
+
+// Palette. The colored "flourishes" are the meaningful signal colors — they are
+// identical in light and dark. Everything else (backgrounds, text, hairlines,
+// the toggle) is a neutral black/white scheme that adapts to appearance; see
+// Theme below.
+enum Palette {
+    static func hex(_ h: UInt32, _ a: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: CGFloat((h >> 16) & 0xff) / 255,
+                green: CGFloat((h >> 8) & 0xff) / 255,
+                blue: CGFloat(h & 0xff) / 255, alpha: a)
+    }
+    static let clay      = hex(0xD97757)  // working / active pane / sunburst
+    static let clock     = hex(0xE0A76B)  // working turn clock
+    static let needs     = hex(0xE8912F)  // needs-input dot / meta
+    static let needsText = hex(0xC79B6A)  // needs-input blocker text
+    static let errorDot  = hex(0xFF6257)  // error dot / meta
+    static let errorText = hex(0xCC7777)  // error cause text
+    static let done      = hex(0x3BD17A)  // finished check / meta
+}
+
+// Neutral scheme — black/white, chosen per appearance. Concrete sRGB colors
+// (not semantic) so a layer's cgColor resolves the same no matter what
+// appearance is current when refreshPanel() runs; the panel is rebuilt on open
+// so it always matches the system's current light/dark.
+struct Theme {
+    let dark: Bool
+    init(_ appearance: NSAppearance) {
+        dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+    private func pick(_ d: NSColor, _ l: NSColor) -> NSColor { dark ? d : l }
+    var panelBg: NSColor     { pick(Palette.hex(0x111112, 0.96), Palette.hex(0xFFFFFF, 0.97)) }
+    var knobFill: NSColor    { pick(Palette.hex(0x1A1A1C), Palette.hex(0xFFFFFF)) }   // "cuts out" of the toggle track
+    var textPrimary: NSColor { pick(Palette.hex(0xF5F5F7), Palette.hex(0x1D1D1F)) }
+    var textSecond: NSColor  { pick(Palette.hex(0x9B9BA1), Palette.hex(0x5E5E63)) }
+    var textMuted: NSColor   { pick(Palette.hex(0x6C6C72), Palette.hex(0x8C8C92)) }
+    var hairline: NSColor    { pick(Palette.hex(0xFFFFFF, 0.12), Palette.hex(0x000000, 0.10)) }
+    var rowHairline: NSColor { pick(Palette.hex(0xFFFFFF, 0.07), Palette.hex(0x000000, 0.06)) }
+    var border: NSColor      { pick(Palette.hex(0xFFFFFF, 0.13), Palette.hex(0x000000, 0.10)) }
+    var idleDot: NSColor     { pick(Palette.hex(0x5C5C62), Palette.hex(0xB2B2B8)) }
+    var hoverWash: NSColor   { pick(Palette.hex(0xFFFFFF, 0.06), Palette.hex(0x000000, 0.045)) }
+    var toggleOn: NSColor    { pick(Palette.hex(0xEDEDEF), Palette.hex(0x1D1D1F)) }
+    var toggleOff: NSColor   { pick(Palette.hex(0xFFFFFF, 0.20), Palette.hex(0x000000, 0.16)) }
+    var footerVer: NSColor   { pick(Palette.hex(0x6C6C72), Palette.hex(0x9A9AA0)) }
+    var footerQuit: NSColor  { pick(Palette.hex(0xD8D8DC), Palette.hex(0x2A2A2E)) }
+}
+
+// The 8-bit mark, drawn procedurally on integer pixel grids (see the design
+// handoff): a 2×2 grid of window panes with the tracked pane lit, and a pixel
+// sunburst. Cells draw 1.03× oversized so the grid reads as one seamless shape.
+enum PixelMark {
+    // Four 6×6 windows at these origins on a 13×13 grid (1-cell gutter between).
+    static let paneOrigins = [(0, 0), (7, 0), (0, 7), (7, 7)]
+
+    // Every window's frame: a 1-cell perimeter plus a full title-bar row at
+    // local y=1, so the top edge reads two cells thick.
+    static let frameCells: [(Int, Int)] = {
+        var c: [(Int, Int)] = []
+        for (ox, oy) in paneOrigins {
+            for lx in 0..<6 {
+                for ly in 0..<6 where lx == 0 || lx == 5 || ly == 0 || ly == 5 || ly == 1 {
+                    c.append((ox + lx, oy + ly))
+                }
+            }
+        }
+        return c
+    }()
+
+    // The lit (top-right) pane's interior.
+    static let activeCells: [(Int, Int)] = {
+        var c: [(Int, Int)] = []
+        for x in 8...11 { for y in 2...4 { c.append((x, y)) } }
+        return c
+    }()
+
+    // Small sunburst on a 7×7 grid (center cell (3,3)): cardinal rays length 3,
+    // diagonals length 2.
+    static let sunburstCells: [(Int, Int)] = {
+        var c: [(Int, Int)] = [(3, 3)]
+        for d in 1...3 { c += [(3 + d, 3), (3 - d, 3), (3, 3 + d), (3, 3 - d)] }
+        for d in 1...2 { c += [(3 + d, 3 + d), (3 - d, 3 + d), (3 + d, 3 - d), (3 - d, 3 - d)] }
+        return c
+    }()
+
+    // Fill grid cells into rect, y measured from the top so title bars stay up.
+    static func fill(_ cells: [(Int, Int)], grid: CGFloat, in rect: NSRect, color: NSColor) {
+        let cell = rect.width / grid
+        color.setFill()
+        for (gx, gy) in cells {
+            NSRect(x: rect.minX + CGFloat(gx) * cell,
+                   y: rect.minY + rect.height - CGFloat(gy + 1) * cell,
+                   width: cell * 1.03, height: cell * 1.03).fill()
+        }
+    }
+
+    // The menu-bar glyph: the panes mark, single color, no lit pane. Template so
+    // the menu bar tints it for light/dark.
+    static func menuGlyph(side: CGFloat) -> NSImage {
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            fill(frameCells, grid: 13, in: rect, color: .black)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+}
+
 // The Claude spark: the CLI's thinking glyphs cycled as animation frames,
-// rendered into fixed-size images so the menu bar and card rows never shift
-// as the glyph changes. Drawing-handler images stay appearance-aware, so
-// dynamic colors (the idle tint) adapt to light/dark without re-rendering.
+// rendered into fixed-size images so the menu bar and rows never shift as the
+// glyph changes. The glyph scales with the requested box size.
 enum Spark {
     static let glyphs = ["✻", "✽", "✶", "✳", "✢"]
-    static let claudeOrange = NSColor(srgbRed: 0.851, green: 0.467, blue: 0.341, alpha: 1)
-    static let side: CGFloat = 14
+    static var frameCount: Int { glyphs.count }
+    static let side: CGFloat = 16
     private static var cache: [String: NSImage] = [:]
 
-    static func image(_ frame: Int, color: NSColor, name: String) -> NSImage {
+    static func image(frame: Int, color: NSColor, side: CGFloat, name: String) -> NSImage {
         let glyph = glyphs[((frame % glyphs.count) + glyphs.count) % glyphs.count]
-        let key = "\(glyph)|\(name)"
+        let key = "\(glyph)|\(name)|\(Int(side))"
         if let img = cache[key] { return img }
         let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
             let s = glyph as NSString
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .font: NSFont.systemFont(ofSize: side - 2, weight: .medium),
                 .foregroundColor: color,
             ]
             let sz = s.size(withAttributes: attrs)
@@ -283,12 +401,13 @@ enum Spark {
         return img
     }
 
-    static func working(_ frame: Int) -> NSImage {
-        image(frame, color: claudeOrange, name: "work")
+    static func working(_ frame: Int, side: CGFloat = side) -> NSImage {
+        image(frame: frame, color: Palette.clay, side: side, name: "work")
     }
 
-    static var idle: NSImage {
-        image(0, color: .tertiaryLabelColor, name: "idle")
+    // A static spark (first frame) for the header count badge.
+    static func badge(side: CGFloat) -> NSImage {
+        image(frame: 0, color: Palette.clay, side: side, name: "badge")
     }
 }
 
@@ -300,36 +419,77 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-// One dropdown card. Top row: colored status dot, the card's name — the
-// user's label if they set one, else repo (+ branch) — and status word + age.
-// Below: the chat title, wrapping up to 3 lines across the card.
-// Hovering swaps the status text for edit ✎ and remove ✕. Editing happens
-// inline over the name with explicit ✓ save / ✗ cancel (Enter/Esc work too);
-// saving empty reverts to repo (+ branch).
+// Custom pill toggle: 34×20 track, monochrome (on = high-contrast neutral). The
+// knob is filled with the panel background so it reads as a cut-out of the
+// track in both light and dark. Hand-drawn because NSSwitch can't be tinted
+// per-instance — it follows the system accent, which is exactly the color we're
+// avoiding.
+final class Toggle: NSView {
+    private var on: Bool
+    private let theme: Theme
+    var onToggle: ((Bool) -> Void)?
+    private let track = CALayer()
+    private let knob = CALayer()
+
+    init(isOn: Bool, theme: Theme) {
+        on = isOn
+        self.theme = theme
+        super.init(frame: NSRect(x: 0, y: 0, width: 34, height: 20))
+        wantsLayer = true
+        track.frame = bounds
+        track.cornerRadius = 10
+        layer?.addSublayer(track)
+        knob.frame = NSRect(x: 2, y: 2, width: 16, height: 16)
+        knob.cornerRadius = 8
+        knob.backgroundColor = theme.knobFill.cgColor
+        layer?.addSublayer(knob)
+        apply(animated: false)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func apply(animated: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animated)
+        CATransaction.setAnimationDuration(0.16)
+        track.backgroundColor = (on ? theme.toggleOn : theme.toggleOff).cgColor
+        knob.frame = NSRect(x: on ? 16 : 2, y: 2, width: 16, height: 16)
+        CATransaction.commit()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        on.toggle()
+        apply(animated: true)
+        onToggle?(on)
+    }
+}
+
+// One dropdown row (replaces the old floating card). Three lines: repo · branch
+// with a right-aligned status meta; the title (user label > AI summary > name);
+// and a detail line (blocker / error / closing message). Hovering swaps the
+// meta for edit ✎ / remove ✕; editing happens inline over the title with ✓ save
+// / ✗ cancel (Enter/Esc too), and an empty save reverts to the AI summary / name.
 final class ChatCardView: NSView, NSTextFieldDelegate {
-    private let card = NSView()
+    private let titleField = NSTextField(labelWithString: "")
     private let meta = NSTextField(labelWithString: "")
     private let deleteBtn = NSButton()
     private let editBtn = NSButton()
     private let saveBtn = NSButton()
     private let cancelBtn = NSButton()
-    private var nameField: NSTextField!
     private var editor: NSTextField?
     private var currentLabel = ""
-    private var namePlaceholder = ""
+    private var fallback = ""
     private var isHovering = false
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
     var onLabel: ((String) -> Void)?
-    private let baseColor = NSColor.labelColor.withAlphaComponent(0.035)
-    private let hoverFX = NSVisualEffectView()
+    private let theme: Theme
+    private let wash = NSView()
     private var sparkView: NSImageView?
     private var turnRef: Date?
     private var animates = false
+    private let cardH: CGFloat
 
-    static let titleFont = NSFont.systemFont(ofSize: 13, weight: .medium)
-    static let lineHeight: CGFloat = 17
-    static let maxLines: CGFloat = 3
+    static let titleFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
 
     static func displayName(_ chat: Chat) -> String {
         if !chat.title.isEmpty { return chat.title }
@@ -337,144 +497,129 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         return folder.isEmpty ? chat.repo : folder
     }
 
-    static func titleHeight(_ name: String, width: CGFloat) -> CGFloat {
-        let rect = (name as NSString).boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: titleFont])
-        return min(ceil(rect.height), lineHeight * maxLines)
+    // The detail line and its color: what Claude is blocked on (needs_input),
+    // the API error that killed the turn (error), a tool-failure streak
+    // (working), or Claude's closing message (done). Empty otherwise. A nil
+    // color means "neutral" — the caller fills in the theme's muted tone.
+    static func detail(for chat: Chat) -> (String, NSColor?) {
+        switch chat.status {
+        case "needs_input": return (chat.waitingOn, Palette.needsText)
+        case "error": return (errorText(chat.errorType), Palette.errorText)
+        case "working" where chat.failStreak >= 3:
+            return ("\(chat.failStreak) tool failures in a row", nil)
+        case "done" where !chat.lastMessage.isEmpty:
+            return (chat.lastMessage, nil)
+        default: return ("", nil)
+        }
     }
 
-    init(chat: Chat, width: CGFloat, titleText: String, userLabel: String) {
-        let cardW = width - 12
-        let titleW = cardW - 41
-        let name = titleText.isEmpty ? Self.displayName(chat) : titleText
-        let textH = Self.titleHeight(name, width: titleW)
-        // Detail line: what Claude is blocked on (orange), the API error that
-        // killed the turn (red), or a tool-failure streak while working (orange).
-        var detail = ""
-        var detailColor = NSColor.systemOrange
-        if chat.status == "needs_input" {
-            detail = chat.waitingOn
-        } else if chat.status == "error" {
-            detail = errorText(chat.errorType)
-            detailColor = .systemRed
-        } else if chat.status == "working" && chat.failStreak >= 3 {
-            detail = "\(chat.failStreak) tool failures in a row"
-        } else if chat.status == "done" && !chat.lastMessage.isEmpty {
-            // Claude's closing message: triage a finished chat from the card.
-            detail = chat.lastMessage
-            detailColor = .secondaryLabelColor
-        }
-        let waitH: CGFloat = detail.isEmpty ? 0 : 17
-        let cardH = textH + waitH + 34
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: cardH + 4))
-        card.frame = NSRect(x: 6, y: 2, width: cardW, height: cardH)
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 9
-        card.layer?.backgroundColor = baseColor.cgColor
-        addSubview(card)
+    static func height(for chat: Chat) -> CGFloat {
+        detail(for: chat).0.isEmpty ? 62 : 80
+    }
 
-        // Hover is the native selection vibrancy (the glassy menu-row look),
-        // not a flat color flip. Added first so it sits under the content.
-        hoverFX.material = .selection
-        hoverFX.blendingMode = .withinWindow
-        hoverFX.state = .active
-        hoverFX.isEmphasized = false
-        hoverFX.wantsLayer = true
-        hoverFX.layer?.cornerRadius = 9
-        hoverFX.layer?.masksToBounds = true
-        hoverFX.frame = card.bounds
-        hoverFX.autoresizingMask = [.width, .height]
-        hoverFX.isHidden = true
-        card.addSubview(hoverFX)
+    init(chat: Chat, width: CGFloat, fallback: String, userLabel: String, theme: Theme) {
+        let (detailText, detailColor) = Self.detail(for: chat)
+        let H = Self.height(for: chat)
+        cardH = H
+        self.fallback = fallback
+        self.theme = theme
+        currentLabel = userLabel
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: H))
+        let W = width
 
-        // Status indicator: working rows get the animated Claude spark
-        // (static while only background tasks run), idle rows a dim one,
-        // finished rows a green check. The attention colors — orange (needs
-        // you), red (error) — stay dots so they keep reading as signals.
+        // Hover wash, under the content.
+        wash.frame = bounds
+        wash.autoresizingMask = [.width, .height]
+        wash.wantsLayer = true
+        wash.layer?.backgroundColor = theme.hoverWash.cgColor
+        wash.isHidden = true
+        addSubview(wash)
+
+        // Glyph column, centered on the top (repo) line: working = animated
+        // Claude spark (static while only background tasks run); done = green check;
+        // needs_input / error = a status dot; idle = a dim dot + the whole row
+        // dropped to 62% so it recedes.
+        let glyphCY = H - 20
         switch chat.status {
-        case "working", "live":
-            let spark = NSImageView(frame: NSRect(x: 9.5, y: cardH - 23,
-                                                  width: Spark.side, height: Spark.side))
-            spark.image = chat.status == "working" ? Spark.working(0) : Spark.idle
-            card.addSubview(spark)
-            sparkView = spark
-            animates = chat.status == "working" && !chat.background
+        case "working":
+            let s = NSImageView(frame: NSRect(x: 16, y: glyphCY - Spark.side / 2,
+                                              width: Spark.side, height: Spark.side))
+            s.image = Spark.working(0)
+            addSubview(s)
+            sparkView = s
+            animates = !chat.background
         case "done":
-            let check = NSImageView(frame: NSRect(x: 9.5, y: cardH - 23,
-                                                  width: Spark.side, height: Spark.side))
+            let check = NSImageView(frame: NSRect(x: 16, y: glyphCY - 8, width: 18, height: 16))
             check.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "finished")?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-            check.contentTintColor = .systemGreen
-            card.addSubview(check)
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+            check.contentTintColor = Palette.done
+            addSubview(check)
         default:
-            let dot = NSView(frame: NSRect(x: 12, y: cardH - 20.5, width: 9, height: 9))
+            let color = chat.status == "needs_input" ? Palette.needs
+                : chat.status == "error" ? Palette.errorDot : theme.idleDot
+            let dot = NSView(frame: NSRect(x: 20, y: glyphCY - 4.5, width: 9, height: 9))
             dot.wantsLayer = true
             dot.layer?.cornerRadius = 4.5
-            dot.layer?.backgroundColor = dotColor(for: chat.status).cgColor
-            card.addSubview(dot)
+            dot.layer?.backgroundColor = color.cgColor
+            addSubview(dot)
+            if chat.status == "live" { alphaValue = 0.62 }
         }
 
-        let repoText = NSMutableAttributedString(string: chat.repo, attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ])
+        // Line 1: repo · branch (middle-ellipsized). The truncation lives in a
+        // paragraph style so an attributed-string label honors it.
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingMiddle
+        let repoAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: theme.textSecond,
+            .paragraphStyle: para,
+        ]
+        let repoText = NSMutableAttributedString(string: chat.repo, attributes: repoAttrs)
         if !chat.branch.isEmpty {
-            repoText.append(NSAttributedString(string: "  \(chat.branch)", attributes: [
-                .font: NSFont.systemFont(ofSize: 11),
-                .foregroundColor: NSColor.tertiaryLabelColor,
+            repoText.append(NSAttributedString(string: "  ·  \(chat.branch)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: theme.textMuted,
+                .paragraphStyle: para,
             ]))
         }
-        // Terminal-hosted chats behave differently on click (focus the app,
-        // no deep link) — say where they live so that's not a surprise.
+        // Terminal-hosted chats behave differently on click (focus the app, no
+        // deep link) — say where they live so that's not a surprise.
         if chat.host == "terminal" {
             repoText.append(NSAttributedString(
                 string: "  \(chat.hostApp.isEmpty ? "CLI" : chat.hostApp)", attributes: [
                     .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
-                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .foregroundColor: theme.textMuted,
                     .baselineOffset: 1,
+                    .paragraphStyle: para,
                 ]))
         }
-        // The card's name: the user's label when set (their chosen identity
-        // for this chat, shown in primary color), else repo (+ branch).
-        currentLabel = userLabel
-        namePlaceholder = chat.repo
-        let cardName = NSTextField(labelWithString: "")
-        if userLabel.isEmpty {
-            cardName.attributedStringValue = repoText
-        } else {
-            cardName.stringValue = userLabel
-            cardName.font = .systemFont(ofSize: 11, weight: .semibold)
-            cardName.textColor = .labelColor
-        }
-        cardName.lineBreakMode = .byTruncatingTail
-        cardName.frame = NSRect(x: 29, y: cardH - 24, width: cardW - 145, height: 16)
-        card.addSubview(cardName)
-        nameField = cardName
+        let repo = NSTextField(labelWithAttributedString: repoText)
+        repo.lineBreakMode = .byTruncatingMiddle
+        // Stop short of the right-aligned meta slot (starts at W-16-140) so the
+        // two can never collide on a long repo · branch + long status word.
+        repo.frame = NSRect(x: 42, y: H - 27, width: (W - 16 - 140) - 42 - 8, height: 14)
+        addSubview(repo)
 
-        // A running turn gets a live clock ("2m 52s") in monospaced digits so
-        // it ticks without wobble; everything else keeps status word + age.
+        // Meta (right): the live turn clock while working, else the status word.
         if chat.status == "working" && !chat.background {
             turnRef = chat.activityDate
             meta.stringValue = elapsed(chat.activityDate)
             meta.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            meta.textColor = .secondaryLabelColor
         } else {
-            meta.stringValue = "\(label(for: chat)) · \(age(chat.activityDate))"
+            meta.stringValue = metaText(for: chat)
             meta.font = .systemFont(ofSize: 11)
-            meta.textColor = chat.status == "needs_input" ? .systemOrange
-                : chat.status == "error" ? .systemRed : .secondaryLabelColor
         }
+        meta.textColor = metaColor(for: chat) ?? theme.textMuted
         meta.alignment = .right
-        meta.frame = NSRect(x: cardW - 112, y: cardH - 24, width: 100, height: 16)
-        card.addSubview(meta)
+        meta.lineBreakMode = .byTruncatingTail
+        meta.frame = NSRect(x: W - 16 - 140, y: H - 27, width: 140, height: 14)
+        addSubview(meta)
 
-        // Hover shows edit ✎ + remove ✕ in the meta text's place; while
-        // editing they become cancel ✗ + save ✓. All refuse first-responder
-        // status, so clicking them never ends the field edit prematurely.
+        // Hover shows edit ✎ + remove ✕ in the meta's place; while editing they
+        // become cancel ✗ + save ✓. All refuse first-responder status, so
+        // clicking them never ends the field edit prematurely.
         func chrome(_ b: NSButton, _ symbol: String, _ tip: String, _ action: Selector,
-                    _ x: CGFloat, tint: NSColor = .tertiaryLabelColor) {
+                    _ x: CGFloat, tint: NSColor) {
             b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
             b.isBordered = false
             b.imagePosition = .imageOnly
@@ -482,35 +627,36 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
             b.target = self
             b.action = action
             b.toolTip = tip
-            b.frame = NSRect(x: x, y: cardH - 27, width: 22, height: 22)
+            b.frame = NSRect(x: x, y: H - 30, width: 22, height: 22)
             b.isHidden = true
-            card.addSubview(b)
+            addSubview(b)
         }
         chrome(deleteBtn, "xmark.circle.fill", "Remove from list",
-               #selector(deleteClicked), cardW - 34)
-        chrome(editBtn, "pencil", "Rename (empty reverts to repo)",
-               #selector(editClicked), cardW - 58)
+               #selector(deleteClicked), W - 34, tint: theme.textMuted)
+        chrome(editBtn, "pencil", "Rename (empty reverts)",
+               #selector(editClicked), W - 58, tint: theme.textMuted)
         chrome(saveBtn, "checkmark.circle.fill", "Save",
-               #selector(saveClicked), cardW - 34, tint: .controlAccentColor)
+               #selector(saveClicked), W - 34, tint: theme.textPrimary)
         chrome(cancelBtn, "xmark.circle", "Cancel",
-               #selector(cancelClicked), cardW - 58)
+               #selector(cancelClicked), W - 58, tint: theme.textMuted)
 
-        if !detail.isEmpty {
-            let w = NSTextField(labelWithString: detail)
-            w.font = .systemFont(ofSize: 11)
-            w.textColor = detailColor
-            w.lineBreakMode = .byTruncatingTail
-            w.frame = NSRect(x: 29, y: 8 + textH + 3, width: titleW, height: 14)
-            card.addSubview(w)
+        // Line 2: the title — user label if set, else the AI summary / name.
+        titleField.stringValue = userLabel.isEmpty ? fallback : userLabel
+        titleField.font = Self.titleFont
+        titleField.textColor = theme.textPrimary
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.frame = NSRect(x: 42, y: H - 49, width: W - 42 - 16, height: 20)
+        addSubview(titleField)
+
+        // Line 3: detail.
+        if !detailText.isEmpty {
+            let d = NSTextField(labelWithString: detailText)
+            d.font = .systemFont(ofSize: 12)
+            d.textColor = detailColor ?? theme.textMuted
+            d.lineBreakMode = .byTruncatingTail
+            d.frame = NSRect(x: 42, y: 13, width: W - 42 - 16, height: 16)
+            addSubview(d)
         }
-
-        let primary = NSTextField(wrappingLabelWithString: name)
-        primary.font = Self.titleFont
-        primary.isSelectable = false
-        primary.maximumNumberOfLines = Int(Self.maxLines)
-        primary.cell?.truncatesLastVisibleLine = true
-        primary.frame = NSRect(x: 29, y: 8, width: titleW, height: textH)
-        card.addSubview(primary)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -537,13 +683,13 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
 
     override func mouseEntered(with event: NSEvent) {
         isHovering = true
-        hoverFX.isHidden = false
+        wash.isHidden = false
         refreshChrome()
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovering = false
-        hoverFX.isHidden = editor == nil  // keep the highlight while editing
+        wash.isHidden = editor == nil  // keep the wash while editing
         refreshChrome()
     }
 
@@ -565,20 +711,20 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
     }
 
     // --- Inline rename ----------------------------------------------------
-    // ✎ swaps the name for a text field over the same spot; ✓/Enter saves,
+    // ✎ swaps the title for a text field over the same spot; ✓/Enter saves,
     // ✗/Esc cancels. The placeholder shows what an empty save reverts to.
 
     @objc private func editClicked() {
         guard editor == nil else { return }
-        let e = NSTextField(frame: NSRect(x: 27, y: card.frame.height - 28.5,
-                                          width: card.frame.width - 27 - 64, height: 21))
+        let e = NSTextField(frame: titleField.frame)
         e.stringValue = currentLabel
-        e.placeholderString = namePlaceholder
-        e.font = .systemFont(ofSize: 11, weight: .semibold)
+        e.placeholderString = fallback
+        e.font = Self.titleFont
+        e.textColor = theme.textPrimary
         e.delegate = self
         e.focusRingType = .none
-        card.addSubview(e)
-        nameField.isHidden = true
+        addSubview(e)
+        titleField.isHidden = true
         editor = e
         refreshChrome()
         window?.makeKey()
@@ -610,13 +756,14 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         editor = nil          // nil first: end-editing side effects become no-ops
         e.delegate = nil
         e.removeFromSuperview()
-        nameField.isHidden = false
+        titleField.isHidden = false
         refreshChrome()
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
+    let menuGlyph = PixelMark.menuGlyph(side: 15)  // leading brand mark; shown only when idle
     var chats: [Chat] = []
     var lastStatuses: [String: String] = [:]
     var firstPoll = true
@@ -628,7 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var nagged: Set<String> = []
     let nagAfter: TimeInterval = 5 * 60
 
-    let panelWidth: CGFloat = 420
+    let panelWidth: CGFloat = 384
     var panel: NSPanel!
     var panelHeight: CGFloat = 0
     var panelFingerprint = ""
@@ -746,6 +893,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        // Leading brand glyph (the panes mark). updateTitle() shows it only when
+        // nothing is active and hides it once there are counts to display.
+        statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.imageHugsTitle = true
 
         panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: 100),
                          styleMask: [.borderless, .nonactivatingPanel],
@@ -869,8 +1020,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }.joined(separator: "\n")
     }
 
-    // Compact native-looking title: small colored dot + count per status,
-    // e.g. "●2 ●1" — much narrower than the old emoji counts.
+    // Compact title: the leading panes glyph (set once, stays as the button's
+    // image) followed by a small colored glyph + count per status, e.g.
+    // "●2 ✳1 ✓3". When nothing is active the title is empty and just the glyph
+    // shows.
     func updateTitle() {
         var counts: [String: Int] = [:]
         for c in chats { counts[c.status, default: 0] += 1 }
@@ -889,40 +1042,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 .foregroundColor: NSColor.labelColor,
             ]))
         }
-        // Working chats show as the Claude spark (animated while any turn is
-        // live) instead of a colored dot — fixed-size image, so the item
+        // Working chats show as the animated Claude spark (cycling while any
+        // turn is live) instead of a colored dot — fixed-size image, so the item
         // never shifts as frames change.
         func sparkSegment(_ n: Int) {
             guard n > 0 else { return }
             if s.length > 0 { s.append(NSAttributedString(string: " ")) }
             let att = NSTextAttachment()
-            att.image = Spark.working(animFrame)
-            att.bounds = CGRect(x: 0, y: -3, width: Spark.side, height: Spark.side)
+            att.image = Spark.working(animFrame, side: 15)
+            att.bounds = CGRect(x: 0, y: -3, width: 15, height: 15)
             s.append(NSAttributedString(attachment: att))
             s.append(NSAttributedString(string: "\u{2009}\(n)", attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.labelColor,
             ]))
         }
-        // Same vocabulary as the cards: spark = working, ✓ = finished,
+        // Same vocabulary as the rows: spark = working, ✓ = finished,
         // colored dots = attention, dim dot = idle.
-        segment(counts["needs_input"] ?? 0, .systemOrange)
-        segment(counts["error"] ?? 0, .systemRed)
+        segment(counts["needs_input"] ?? 0, Palette.needs)
+        segment(counts["error"] ?? 0, Palette.errorDot)
         sparkSegment(counts["working"] ?? 0)
-        segment(counts["done"] ?? 0, .systemGreen, glyph: "✓", size: 11, weight: .semibold)
+        segment(counts["done"] ?? 0, Palette.done, glyph: "✓", size: 11, weight: .semibold)
         segment(counts["live"] ?? 0, .tertiaryLabelColor)
         ensureAnimTimer()
-        if s.length > 0 {
-            statusItem.button?.image = nil
-            statusItem.button?.attributedTitle = s
-        } else if let glyph = NSImage(systemSymbolName: "bubble.left.and.bubble.right",
-                                      accessibilityDescription: "Chat Status") {
-            glyph.isTemplate = true
-            statusItem.button?.attributedTitle = NSAttributedString()
-            statusItem.button?.image = glyph
-        } else {
-            statusItem.button?.attributedTitle = NSAttributedString(string: "✳︎")
-        }
+        // The brand glyph only leads when nothing is active — i.e. every chat is
+        // idle, or there are none. As soon as a chat needs you / errors / works /
+        // finishes, drop the glyph and let the count segments stand alone.
+        let active = (counts["needs_input"] ?? 0) + (counts["error"] ?? 0)
+            + (counts["working"] ?? 0) + (counts["done"] ?? 0)
+        statusItem.button?.image = active > 0 ? nil : menuGlyph
+        statusItem.button?.attributedTitle = s
     }
 
     // Start the spark clock when a foreground turn is working, stop it when
@@ -940,7 +1089,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func animTick() {
-        animFrame = (animFrame + 1) % Spark.glyphs.count
+        animFrame = (animFrame + 1) % Spark.frameCount
         updateTitle()
         if panel.isVisible {
             for c in liveCards { c.animTick(animFrame) }
@@ -1056,29 +1205,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return b
     }
 
+    // The count segments shown at the right of the header, matching the row
+    // vocabulary: needs ●, error ●, working spark, done ✓, idle ●.
+    func headerCounts(_ theme: Theme) -> NSAttributedString {
+        var counts: [String: Int] = [:]
+        for c in chats { counts[c.status, default: 0] += 1 }
+        let s = NSMutableAttributedString()
+        func seg(_ n: Int, glyph: String, color: NSColor) {
+            guard n > 0 else { return }
+            if s.length > 0 { s.append(NSAttributedString(string: "  ")) }
+            s.append(NSAttributedString(string: glyph, attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+                .foregroundColor: color,
+            ]))
+            s.append(NSAttributedString(string: "\u{2009}\(n)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: theme.textSecond,
+            ]))
+        }
+        func sparkSeg(_ n: Int) {
+            guard n > 0 else { return }
+            if s.length > 0 { s.append(NSAttributedString(string: "  ")) }
+            let att = NSTextAttachment()
+            att.image = Spark.badge(side: 13)
+            att.bounds = CGRect(x: 0, y: -2, width: 13, height: 13)
+            s.append(NSAttributedString(attachment: att))
+            s.append(NSAttributedString(string: "\u{2009}\(n)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: theme.textSecond,
+            ]))
+        }
+        seg(counts["needs_input"] ?? 0, glyph: "●", color: Palette.needs)
+        seg(counts["error"] ?? 0, glyph: "●", color: Palette.errorDot)
+        sparkSeg(counts["working"] ?? 0)
+        seg(counts["done"] ?? 0, glyph: "✓", color: Palette.done)
+        seg(counts["live"] ?? 0, glyph: "●", color: theme.idleDot)
+        return s
+    }
+
     func refreshPanel() {
         panelFingerprint = fingerprint()
         let W = panelWidth
-        let headerH: CGFloat = 36
+        let headerH: CGFloat = 42
+        let footerH: CGFloat = 46
+        // Neutral colors follow the system's current light/dark; the panel is
+        // rebuilt on open, so it always matches.
+        let theme = Theme(panel.effectiveAppearance)
 
-        // Cards stack, laid out top-down in a flipped container.
+        // Rows stack, laid out top-down in a flipped container, separated by
+        // inset hairlines rather than card backgrounds.
         let content = FlippedView()
         liveCards = []
-        var y: CGFloat = 2
+        var y: CGFloat = 0
         if chats.isEmpty {
             let empty = NSTextField(labelWithString: "No active chats")
             empty.font = .systemFont(ofSize: 12)
-            empty.textColor = .secondaryLabelColor
+            empty.textColor = theme.textSecond
             empty.alignment = .center
-            empty.frame = NSRect(x: 0, y: 16, width: W, height: 18)
+            empty.frame = NSRect(x: 0, y: 20, width: W, height: 18)
             content.addSubview(empty)
-            y = 50
+            y = 58
         }
-        for chat in chats {
-            let card = ChatCardView(chat: chat, width: W - 20,
-                                    titleText: summaryText(for: chat) ?? "",
-                                    userLabel: labels[chat.sessionId] ?? "")
-            card.setFrameOrigin(NSPoint(x: 10, y: y))
+        for (i, chat) in chats.enumerated() {
+            let card = ChatCardView(chat: chat, width: W,
+                                    fallback: summaryText(for: chat) ?? ChatCardView.displayName(chat),
+                                    userLabel: labels[chat.sessionId] ?? "", theme: theme)
+            card.setFrameOrigin(NSPoint(x: 0, y: y))
             card.toolTip = chat.cwd
             card.onClick = { [weak self] in
                 self?.hidePanel()
@@ -1105,51 +1297,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             content.addSubview(card)
             liveCards.append(card)
-            y += card.frame.height + 4
+            y += card.frame.height
+            if i < chats.count - 1 {
+                let sep = NSView(frame: NSRect(x: 16, y: y, width: W - 32, height: 1))
+                sep.wantsLayer = true
+                sep.layer?.backgroundColor = theme.rowHairline.cgColor
+                content.addSubview(sep)
+            }
         }
-        let contentH = y + 8
+        let contentH = max(y, chats.isEmpty ? 58 : 0)
         content.frame = NSRect(x: 0, y: 0, width: W, height: contentH)
-        let cardsH = min(contentH, 420)
+        let cardsH = min(contentH, 460)
 
-        // Fixed sections under the scrolling card list, menu-style:
-        // Options (switches) and a version/quit footer.
-        var optionRows: [(String, Bool, Selector)] = [
-            ("Notifications", notificationsEnabled, #selector(toggleNotifications(_:))),
+        // Options: one labeled toggle per switch. Notifications changes no row
+        // content, so its handler just flips the pref. AI summaries changes the
+        // titles, so it rebuilds — deferred so the toggle finishes animating.
+        var optionRows: [(String, Bool, (Bool) -> Void)] = [
+            ("Notifications", notificationsEnabled, { [weak self] on in
+                self?.notificationsEnabled = on }),
         ]
         if summariesAvailable {
-            optionRows.append(("AI summaries", summariesEnabled, #selector(toggleSummaries(_:))))
+            optionRows.append(("AI summaries", summariesEnabled, { [weak self] on in
+                guard let self else { return }
+                self.summariesEnabled = on
+                if on { self.chats.forEach { self.ensureSummary(for: $0) } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
+                    guard let self, self.panel.isVisible else { return }
+                    self.refreshPanel(); self.positionPanel()
+                }
+            }))
         }
-        let footerH: CGFloat = 52
-        let optionsH: CGFloat = CGFloat(optionRows.count) * 26 + 32
+        let optionsH: CGFloat = 30 + CGFloat(optionRows.count) * 30 + 6
         panelHeight = headerH + cardsH + optionsH + footerH
 
+        // Root: the system popover material (adapts to light/dark) with the
+        // panel color washed over it and a hairline border.
         let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: W, height: panelHeight))
         root.material = .popover
         root.blendingMode = .behindWindow
         root.state = .active
         root.wantsLayer = true
-        root.layer?.cornerRadius = 14
+        root.layer?.cornerRadius = 16
         root.layer?.masksToBounds = true
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = theme.border.cgColor
 
-        func hline(_ y: CGFloat) {
-            let line = NSView(frame: NSRect(x: 14, y: y, width: W - 28, height: 1))
+        let tint = NSView(frame: root.bounds)
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = theme.panelBg.cgColor
+        root.addSubview(tint)
+
+        func hline(_ yy: CGFloat) {
+            let line = NSView(frame: NSRect(x: 0, y: yy, width: W, height: 1))
             line.wantsLayer = true
-            line.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+            line.layer?.backgroundColor = theme.hairline.cgColor
             root.addSubview(line)
         }
-        func sectionLabel(_ text: String, y: CGFloat) {
-            let l = NSTextField(labelWithString: text)
-            l.font = .systemFont(ofSize: 11, weight: .semibold)
-            l.textColor = .tertiaryLabelColor
-            l.frame = NSRect(x: 18, y: y, width: 200, height: 14)
-            root.addSubview(l)
+        func eyebrow(_ text: String) -> NSTextField {
+            NSTextField(labelWithAttributedString: NSAttributedString(
+                string: text.uppercased(), attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: theme.textMuted,
+                    .kern: 0.8,
+                ]))
         }
 
-        // Header: section label, with clear-finished at the right edge.
-        sectionLabel("Sessions", y: panelHeight - 25)
+        // Header: SESSIONS eyebrow (left), count segments + clear-finished (right).
+        let hdr = eyebrow("Sessions")
+        hdr.frame = NSRect(x: 16, y: panelHeight - 27, width: 200, height: 14)
+        root.addSubview(hdr)
         let trash = headerButton("trash", "Clear finished", #selector(clearFinished(_:)))
-        trash.setFrameOrigin(NSPoint(x: W - 34, y: panelHeight - 29))
+        trash.contentTintColor = theme.textMuted
+        trash.setFrameOrigin(NSPoint(x: W - 30, y: panelHeight - 30))
         root.addSubview(trash)
+        let counts = NSTextField(labelWithAttributedString: headerCounts(theme))
+        counts.alignment = .right
+        counts.lineBreakMode = .byClipping
+        counts.frame = NSRect(x: W - 40 - 170, y: panelHeight - 28, width: 170, height: 16)
+        root.addSubview(counts)
+        hline(panelHeight - headerH)
 
         let scroll = NSScrollView(frame: NSRect(x: 0, y: footerH + optionsH, width: W, height: cardsH))
         scroll.drawsBackground = false
@@ -1158,48 +1385,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         scroll.documentView = content
         root.addSubview(scroll)
 
-        // Options: one labeled switch per toggle.
-        hline(footerH + optionsH - 1)
-        sectionLabel("Options", y: footerH + optionsH - 23)
-        var ry = footerH + optionsH - 27
-        for (title, on, action) in optionRows {
-            ry -= 26
+        // Options section.
+        hline(footerH + optionsH)
+        let optEyebrow = eyebrow("Options")
+        optEyebrow.frame = NSRect(x: 16, y: footerH + optionsH - 24, width: 200, height: 14)
+        root.addSubview(optEyebrow)
+        var ry = footerH + optionsH - 30
+        for (title, on, handler) in optionRows {
+            ry -= 30
             let l = NSTextField(labelWithString: title)
-            l.font = .systemFont(ofSize: 12)
-            l.frame = NSRect(x: 18, y: ry + 5, width: 220, height: 16)
+            l.font = .systemFont(ofSize: 13.5)
+            l.textColor = theme.textPrimary
+            l.frame = NSRect(x: 16, y: ry + 6, width: 220, height: 18)
             root.addSubview(l)
-            let sw = NSSwitch()
-            sw.controlSize = .small
-            sw.state = on ? .on : .off
-            sw.target = self
-            sw.action = action
-            sw.sizeToFit()
-            sw.setFrameOrigin(NSPoint(x: W - sw.frame.width - 16,
-                                      y: ry + (26 - sw.frame.height) / 2))
-            root.addSubview(sw)
+            let t = Toggle(isOn: on, theme: theme)
+            t.onToggle = handler
+            t.setFrameOrigin(NSPoint(x: W - 16 - 34, y: ry + (30 - 20) / 2))
+            root.addSubview(t)
         }
 
-        // Footer: version whisper + quit with its shortcut hint.
-        hline(footerH - 1)
+        // Footer: version whisper (left), quit + shortcut hint (right).
+        hline(footerH)
         let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
                        as? String) ?? "dev"
-        let vl = NSTextField(labelWithString: "Version \(version)")
-        vl.font = .systemFont(ofSize: 11)
-        vl.textColor = .tertiaryLabelColor
-        vl.frame = NSRect(x: 18, y: footerH - 22, width: 200, height: 14)
+        let vl = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: "v\(version)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: theme.footerVer,
+            ]))
+        vl.frame = NSRect(x: 16, y: (footerH - 14) / 2, width: 140, height: 14)
         root.addSubview(vl)
+        let kbd = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: "⌘Q", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: theme.textMuted,
+            ]))
+        kbd.alignment = .right
+        kbd.frame = NSRect(x: W - 16 - 28, y: (footerH - 14) / 2, width: 28, height: 14)
+        root.addSubview(kbd)
         let quit = NSButton(title: "Quit", target: self, action: #selector(quitApp(_:)))
         quit.isBordered = false
-        quit.font = .systemFont(ofSize: 12)
+        quit.attributedTitle = NSAttributedString(string: "Quit", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: theme.footerQuit,
+        ])
         quit.sizeToFit()
-        quit.setFrameOrigin(NSPoint(x: 14, y: 7))
+        quit.setFrameOrigin(NSPoint(x: W - 16 - 28 - 6 - quit.frame.width,
+                                    y: (footerH - quit.frame.height) / 2))
         root.addSubview(quit)
-        let kbd = NSTextField(labelWithString: "⌘Q")
-        kbd.font = .systemFont(ofSize: 11)
-        kbd.textColor = .tertiaryLabelColor
-        kbd.alignment = .right
-        kbd.frame = NSRect(x: W - 60, y: 10, width: 44, height: 14)
-        root.addSubview(kbd)
 
         panel.contentView = root
         panel.invalidateShadow()
@@ -1245,28 +1478,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    // A rebuild would cut off the switch's own flip animation, so skip it
-    // when the switch is the sender — its state is already right. Summaries
-    // still need one (card titles change), just deferred past the animation.
+    // Right-click menu items (the panel's own toggles are custom Toggle views
+    // with their own handlers). The panel is hidden before the menu opens, so a
+    // rebuild here is just belt-and-suspenders.
     @objc func toggleNotifications(_ sender: Any?) {
         notificationsEnabled.toggle()
-        if panel.isVisible, !(sender is NSSwitch) { refreshPanel(); positionPanel() }
+        if panel.isVisible { refreshPanel(); positionPanel() }
     }
 
     @objc func toggleSummaries(_ sender: Any?) {
         summariesEnabled.toggle()
         if summariesEnabled { chats.forEach { ensureSummary(for: $0) } }
-        guard panel.isVisible else { return }
-        if sender is NSSwitch {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self, self.panel.isVisible else { return }
-                self.refreshPanel()
-                self.positionPanel()
-            }
-        } else {
-            refreshPanel()
-            positionPanel()
-        }
+        if panel.isVisible { refreshPanel(); positionPanel() }
     }
 
     @objc func clearFinished(_ sender: Any?) {
