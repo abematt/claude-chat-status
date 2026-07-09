@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/icon.png" alt="ChatStatus icon" width="112">
+
 # ChatStatus
 
 **Every Claude Code chat, live in your menu bar.**
