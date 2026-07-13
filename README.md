@@ -39,6 +39,7 @@ Idempotent, clone-anywhere. Requires macOS and [`jq`](https://jqlang.github.io/j
 - **Click a card** (or its notification) → jumps to where the chat lives. VS Code chats focus that repo's window and deep-link the exact conversation via `vscode://anthropic.claude-code/open`; CLI chats focus their terminal app (marked on the card — app-level, no tab focus, and tmux-server sessions can't be focused).
 - **Notifications** fire on *needs you* / *errored* / *finished* — one live banner per chat, withdrawn automatically once you've answered or the state moves on. Left waiting 5 minutes, you get one follow-up ping.
 - **Hover a card** to rename (✎ — your label replaces repo · branch everywhere, including notifications) or remove (✕).
+- **Cards sort automatically** — needs-you first, then working, finished, idle. Flip **Auto order** off in Options and drag cards into your own order (it persists; new chats drop in on top).
 - **A finish with background tasks still running isn't "finished"** — the card shows *background* and completes for real when the work stops.
 - **⌃⌥C** toggles the panel from anywhere · **Esc** closes it · **right-click** the menu bar item for a quick menu. Rebind the hotkey: `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` (+ `hotkeyModifiers`).
 - Chats whose Claude process died without a clean exit are reaped in seconds (PID + start-time check); anything silent for 24h is pruned.

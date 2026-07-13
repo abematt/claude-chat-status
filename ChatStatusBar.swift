@@ -482,6 +482,15 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
     var onLabel: ((String) -> Void)?
+    // Drag-to-reorder: the card is the mouse-event source, but the reorder
+    // spans the whole stack, so it hands events up to the AppDelegate.
+    var onReorderBegin: ((NSEvent) -> Void)?
+    var onReorderMove: ((NSEvent) -> Void)?
+    var onReorderEnd: (() -> Void)?
+    var reorderable = false   // only true in manual-order mode
+    let sessionId: String
+    private var mouseDownAt: NSPoint?
+    private var dragging = false
     private let theme: Theme
     private let wash = NSView()
     private var sparkView: NSImageView?
@@ -523,6 +532,7 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         cardH = H
         self.fallback = fallback
         self.theme = theme
+        sessionId = chat.sessionId
         currentLabel = userLabel
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: H))
         let W = width
@@ -701,9 +711,48 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         if let t = turnRef { meta.stringValue = elapsed(t) }
     }
 
+    // A press that moves past a small threshold becomes a reorder drag; a press
+    // that doesn't is a click. Renaming (editor != nil) suppresses both.
+    private static let dragThreshold: CGFloat = 4
+
+    override func mouseDown(with event: NSEvent) {
+        guard editor == nil else { return }
+        mouseDownAt = event.locationInWindow
+        dragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard reorderable, editor == nil, let start = mouseDownAt else { return }
+        if !dragging {
+            guard abs(event.locationInWindow.y - start.y) >= Self.dragThreshold else { return }
+            dragging = true
+            onReorderBegin?(event)
+        }
+        onReorderMove?(event)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        defer { mouseDownAt = nil }
+        if dragging {
+            dragging = false
+            onReorderEnd?()
+            return
+        }
         guard editor == nil else { return }  // don't jump away mid-edit
         onClick?()
+    }
+
+    // Visually raise the grabbed card above the stack so it reads as lifted and
+    // occludes the cards it passes over (the card is otherwise transparent).
+    func setLifted(_ lifted: Bool, background: NSColor) {
+        wantsLayer = true
+        layer?.backgroundColor = (lifted ? background : .clear).cgColor
+        layer?.cornerRadius = lifted ? 10 : 0
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = lifted ? 0.22 : 0
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = .zero
+        layer?.masksToBounds = false
     }
 
     @objc private func deleteClicked() {
@@ -789,6 +838,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var animFrame = 0
     var liveCards: [ChatCardView] = []
 
+    // Manual card order (drag-to-reorder), persisted by session id. Reconciled
+    // on every load — dead sessions pruned, new sessions prepended by recency —
+    // and used instead of the status sort. See ordered().
+    var cardOrder: [String] = []
+    // Live drag state. There's no table view (cards are a hand-laid stack), so a
+    // reorder moves the grabbed card with the cursor and re-stacks the rest
+    // around the gap; poll() won't rebuild the panel while isReordering.
+    var isReordering = false
+    weak var cardsContainer: NSView?
+    var rowSeparators: [NSView] = []
+    var dragCard: ChatCardView?
+    var dragOffsetY: CGFloat = 0
+
     // On-device AI one-line summaries, keyed by session. Cache stores the
     // source-text hash so a summary is recomputed only when the prompt changes.
     // Persisted to UserDefaults so a relaunch doesn't re-summarize every chat.
@@ -829,9 +891,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UserDefaults.standard.set(labels, forKey: "labels")
     }
 
+    func loadCardOrder() {
+        cardOrder = UserDefaults.standard.stringArray(forKey: "cardOrder") ?? []
+    }
+
+    func saveCardOrder() {
+        UserDefaults.standard.set(cardOrder, forKey: "cardOrder")
+    }
+
+    // Reconcile the persisted manual order against the live chats and return
+    // them in that order: prune sessions that have ended, and drop any new
+    // session in at the top (newest first) so fresh work is visible. cardOrder
+    // is kept in lockstep with what's shown, so a drag just rewrites it.
+    func ordered(_ chats: [Chat]) -> [Chat] {
+        let byId = Dictionary(chats.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
+        let placed = Set(cardOrder)
+        let newcomers = chats.filter { !placed.contains($0.sessionId) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .map { $0.sessionId }
+        let reconciled = newcomers + cardOrder.filter { byId[$0] != nil }
+        if reconciled != cardOrder { cardOrder = reconciled; saveCardOrder() }
+        return cardOrder.compactMap { byId[$0] }
+    }
+
     var notificationsEnabled: Bool {
         get { !UserDefaults.standard.bool(forKey: "notificationsPaused") }
         set { UserDefaults.standard.set(!newValue, forKey: "notificationsPaused") }
+    }
+
+    // Off (default) = the automatic status sort (needs_input floats to the top).
+    // On = manual drag-to-reorder via cardOrder. bool(forKey:) is false when
+    // unset, so a fresh install keeps the original behavior.
+    var manualOrder: Bool {
+        get { UserDefaults.standard.bool(forKey: "manualOrder") }
+        set { UserDefaults.standard.set(newValue, forKey: "manualOrder") }
+    }
+
+    // Chats in the current mode's order: manual (cardOrder) or automatic (the
+    // status sort loadChats() already applies).
+    func sortedChats() -> [Chat] {
+        manualOrder ? ordered(loadChats()) : loadChats()
     }
 
     // Default on (bool(forKey:) is false when unset); only meaningful when the
@@ -924,6 +1023,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         registerHotkey()
         loadSummaryCache()
         loadLabels()
+        loadCardOrder()
         poll()
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
@@ -937,7 +1037,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
             DispatchQueue.main.async { self.nativeNotifications = ok }
         }
-        chats = loadChats()
+        chats = sortedChats()
         // Keep summaries warm and current in the background so cards and
         // notifications can read them from cache the moment they're needed.
         for chat in chats { ensureSummary(for: chat) }
@@ -1003,7 +1103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Live-refresh the panel while it's open, but only when content changed
         // (a rebuild resets hover state, so don't do it for nothing) — and
         // never out from under an active inline rename.
-        if panel.isVisible, !(panel.firstResponder is NSTextView) {
+        if panel.isVisible, !isReordering, !(panel.firstResponder is NSTextView) {
             let fp = fingerprint()
             if fp != panelFingerprint {
                 refreshPanel()
@@ -1131,6 +1231,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         RegisterEventHotKey(key, mods, hkid, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
+    // ANSI virtual key codes → their key cap, for the shortcut hint. Covers the
+    // realistic rebind space (letters + digits); anything else shows "•".
+    static let keyLabels: [UInt32: String] = [
+        0x00: "A", 0x0B: "B", 0x08: "C", 0x02: "D", 0x0E: "E", 0x03: "F",
+        0x05: "G", 0x04: "H", 0x22: "I", 0x26: "J", 0x28: "K", 0x25: "L",
+        0x2E: "M", 0x2D: "N", 0x1F: "O", 0x23: "P", 0x0C: "Q", 0x0F: "R",
+        0x01: "S", 0x11: "T", 0x20: "U", 0x09: "V", 0x0D: "W", 0x07: "X",
+        0x10: "Y", 0x06: "Z", 0x1D: "0", 0x12: "1", 0x13: "2", 0x14: "3",
+        0x15: "4", 0x17: "5", 0x16: "6", 0x1A: "7", 0x1C: "8", 0x19: "9",
+    ]
+
+    // The panel-toggle hotkey as symbols (e.g. "⌃⌥C"), read from the same
+    // defaults registerHotkey() uses so a rebind stays reflected.
+    func hotkeyHint() -> String {
+        let d = UserDefaults.standard
+        let mods = (d.object(forKey: "hotkeyModifiers") as? NSNumber)?.uint32Value
+            ?? UInt32(controlKey | optionKey)
+        let code = (d.object(forKey: "hotkeyKeyCode") as? NSNumber)?.uint32Value
+            ?? UInt32(kVK_ANSI_C)
+        var s = ""
+        if mods & UInt32(controlKey) != 0 { s += "⌃" }
+        if mods & UInt32(optionKey) != 0 { s += "⌥" }
+        if mods & UInt32(shiftKey) != 0 { s += "⇧" }
+        if mods & UInt32(cmdKey) != 0 { s += "⌘" }
+        return s + (Self.keyLabels[code] ?? "•")
+    }
+
     // Right-click on the status item: a small native menu, so quit / clear /
     // notification toggles are reachable without opening the panel.
     func showContextMenu() {
@@ -1141,6 +1268,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             menu.addItem(i)
         }
         item("Clear Finished", #selector(clearFinished(_:)))
+        item(manualOrder ? "Automatic Order" : "Manual Order",
+             #selector(toggleManualOrder(_:)))
         item(notificationsEnabled ? "Pause Notifications" : "Resume Notifications",
              #selector(toggleNotifications(_:)))
         if summariesAvailable {
@@ -1157,7 +1286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func showPanel() {
-        chats = loadChats()
+        chats = sortedChats()
         refreshPanel()
         positionPanel()
         // Key (not just front) so Esc reaches the monitor below; the
@@ -1255,7 +1384,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Rows stack, laid out top-down in a flipped container, separated by
         // inset hairlines rather than card backgrounds.
         let content = FlippedView()
+        cardsContainer = content
         liveCards = []
+        rowSeparators = []
         var y: CGFloat = 0
         if chats.isEmpty {
             let empty = NSTextField(labelWithString: "No active chats")
@@ -1295,6 +1426,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.refreshPanel()
                 self.positionPanel()
             }
+            card.reorderable = manualOrder
+            card.onReorderBegin = { [weak self, weak card] e in self?.reorderBegin(card, event: e) }
+            card.onReorderMove = { [weak self, weak card] e in self?.reorderMove(card, event: e) }
+            card.onReorderEnd = { [weak self] in self?.reorderEnd() }
             content.addSubview(card)
             liveCards.append(card)
             y += card.frame.height
@@ -1303,6 +1438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 sep.wantsLayer = true
                 sep.layer?.backgroundColor = theme.rowHairline.cgColor
                 content.addSubview(sep)
+                rowSeparators.append(sep)
             }
         }
         let contentH = max(y, chats.isEmpty ? 58 : 0)
@@ -1315,6 +1451,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         var optionRows: [(String, Bool, (Bool) -> Void)] = [
             ("Notifications", notificationsEnabled, { [weak self] on in
                 self?.notificationsEnabled = on }),
+            // Auto order (on by default) = the status sort. Turning it OFF hands
+            // over to manual drag-to-reorder. Changing it re-sorts and rebuilds —
+            // deferred so the toggle finishes animating. Going manual the first
+            // time seeds cardOrder from the current view so nothing jumps; a
+            // prior arrangement is kept.
+            ("Auto order", !manualOrder, { [weak self] on in
+                guard let self else { return }
+                let manual = !on
+                self.manualOrder = manual
+                let base = loadChats()
+                if manual {
+                    if self.cardOrder.isEmpty {
+                        self.cardOrder = base.map { $0.sessionId }
+                        self.saveCardOrder()
+                    }
+                    self.chats = self.ordered(base)
+                } else {
+                    self.chats = base
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
+                    guard let self, self.panel.isVisible else { return }
+                    self.refreshPanel(); self.positionPanel()
+                }
+            }),
         ]
         if summariesAvailable {
             optionRows.append(("AI summaries", summariesEnabled, { [weak self] on in
@@ -1363,10 +1523,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 ]))
         }
 
-        // Header: SESSIONS eyebrow (left), count segments + clear-finished (right).
+        // Header: SESSIONS eyebrow + the toggle-shortcut keycap (left), count
+        // segments + clear-finished (right).
         let hdr = eyebrow("Sessions")
-        hdr.frame = NSRect(x: 16, y: panelHeight - 27, width: 200, height: 14)
+        hdr.frame = NSRect(x: 16, y: panelHeight - 27, width: 72, height: 14)
         root.addSubview(hdr)
+        // Shortcut hint as a faint keycap, so the global toggle is discoverable.
+        let hintText = hotkeyHint()
+        let hint = NSTextField(labelWithString: hintText)
+        hint.font = .systemFont(ofSize: 10.5, weight: .medium)
+        hint.textColor = theme.textMuted
+        hint.sizeToFit()
+        let cap = NSView(frame: NSRect(x: 92, y: panelHeight - 29,
+                                       width: ceil(hint.frame.width) + 14, height: 17))
+        cap.wantsLayer = true
+        cap.layer?.cornerRadius = 5
+        cap.layer?.backgroundColor = theme.hoverWash.cgColor
+        cap.layer?.borderWidth = 1
+        cap.layer?.borderColor = theme.hairline.cgColor
+        hint.setFrameOrigin(NSPoint(x: 7, y: (17 - hint.frame.height) / 2))
+        cap.addSubview(hint)
+        cap.toolTip = "Toggle ChatStatus (\(hintText))"
+        root.addSubview(cap)
         let trash = headerButton("trash", "Clear finished", #selector(clearFinished(_:)))
         trash.contentTintColor = theme.textMuted
         trash.setFrameOrigin(NSPoint(x: W - 30, y: panelHeight - 30))
@@ -1450,6 +1628,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                        display: true)
     }
 
+    // --- Drag-to-reorder --------------------------------------------------
+    // The grabbed card follows the cursor; the rest re-stack around the gap it
+    // would leave. On drop we rewrite cardOrder and rebuild the panel so
+    // positions, separators and z-order settle exactly. All coordinates are in
+    // the (flipped) card container, so origin.y grows downward like the layout.
+
+    func reorderBegin(_ card: ChatCardView?, event: NSEvent) {
+        guard let card, let container = cardsContainer, liveCards.count > 1 else { return }
+        isReordering = true
+        dragCard = card
+        let p = container.convert(event.locationInWindow, from: nil)
+        dragOffsetY = p.y - card.frame.origin.y   // where in the card it was grabbed
+        rowSeparators.forEach { $0.isHidden = true }
+        container.addSubview(card)                 // raise above the others
+        card.setLifted(true, background: Theme(panel.effectiveAppearance).panelBg)
+    }
+
+    func reorderMove(_ card: ChatCardView?, event: NSEvent) {
+        guard isReordering, let card, let container = cardsContainer else { return }
+        let p = container.convert(event.locationInWindow, from: nil)
+        card.frame.origin.y = max(0, min(p.y - dragOffsetY,
+                                         container.frame.height - card.frame.height))
+        let others = liveCards.filter { $0 !== card }
+        let target = dropTarget(midY: card.frame.midY, among: others)
+        var oy: CGFloat = 0
+        for i in 0...others.count {
+            if i == target { oy += card.frame.height }   // leave the gap
+            if i < others.count {
+                others[i].frame.origin.y = oy
+                oy += others[i].frame.height
+            }
+        }
+    }
+
+    func reorderEnd() {
+        guard isReordering, let card = dragCard else { isReordering = false; return }
+        let others = liveCards.filter { $0 !== card }
+        let target = dropTarget(midY: card.frame.midY, among: others)
+        var final = others
+        final.insert(card, at: min(target, others.count))
+        cardOrder = final.map { $0.sessionId }
+        saveCardOrder()
+        isReordering = false
+        dragCard = nil
+        // Rebuild from the new order — discards the lifted card and its shadow.
+        chats = sortedChats()
+        refreshPanel()
+        positionPanel()
+    }
+
+    // Where the dragged card's midpoint falls in a gapless stack of the others.
+    func dropTarget(midY: CGFloat, among others: [ChatCardView]) -> Int {
+        var acc: CGFloat = 0
+        for (i, o) in others.enumerated() {
+            if midY < acc + o.frame.height / 2 { return i }
+            acc += o.frame.height
+        }
+        return others.count
+    }
+
     // Routes a click to where the chat actually lives.
     // Terminal-hosted chats (CLI in iTerm/Terminal/tmux…) just focus their
     // host app by PID — opening VS Code for them was wrong. App-level only:
@@ -1489,6 +1727,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     @objc func toggleSummaries(_ sender: Any?) {
         summariesEnabled.toggle()
         if summariesEnabled { chats.forEach { ensureSummary(for: $0) } }
+        if panel.isVisible { refreshPanel(); positionPanel() }
+    }
+
+    @objc func toggleManualOrder(_ sender: Any?) {
+        manualOrder.toggle()
+        // Seed the manual order from the current view the first time, so the
+        // switch doesn't reshuffle; keep any prior arrangement otherwise.
+        if manualOrder, cardOrder.isEmpty {
+            cardOrder = loadChats().map { $0.sessionId }
+            saveCardOrder()
+        }
+        chats = sortedChats()
         if panel.isVisible { refreshPanel(); positionPanel() }
     }
 

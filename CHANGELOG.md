@@ -3,6 +3,20 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.9.0 — 2026-07-13
+
+Card ordering you control, plus a discoverable toggle shortcut.
+
+- Card order is now a choice: an **"Auto order"** toggle (in OPTIONS and the
+  right-click menu), on by default — the status sort where needs-input floats to
+  the top, unchanged from before.
+- Turn **Auto order off** for drag-to-reorder: drag a card to place it and the
+  arrangement persists (in `cardOrder`). New sessions drop in at the top by
+  recency; ended sessions fall out. Going manual keeps whatever order you're
+  looking at, so nothing jumps.
+- The panel header now shows the global toggle shortcut (default ⌃⌥C) as a
+  keycap, so it's discoverable; it reflects a rebound hotkey.
+
 ## 0.8.0 — 2026-07-09
 
 Pixel-mark redesign (design handoff 4e/4g) — new icon, glyph, and a
