@@ -311,6 +311,15 @@ struct Theme {
     var toggleOff: NSColor   { pick(Palette.hex(0xFFFFFF, 0.20), Palette.hex(0x000000, 0.16)) }
     var footerVer: NSColor   { pick(Palette.hex(0x6C6C72), Palette.hex(0x9A9AA0)) }
     var footerQuit: NSColor  { pick(Palette.hex(0xD8D8DC), Palette.hex(0x2A2A2E)) }
+    // Gallery tiles: a faint pane fill and a hover lift.
+    // Gallery: quiet raised cards on a slightly recessed backdrop — lighter than
+    // the backdrop in both schemes, separated by a soft shadow (light) or a
+    // faint edge (dark) rather than an outline.
+    var galleryBg: NSColor   { pick(Palette.hex(0x141415, 0.90), Palette.hex(0xEFEFF2, 0.90)) }
+    var tileBg: NSColor      { pick(Palette.hex(0xFFFFFF, 0.065), Palette.hex(0xFFFFFF, 0.80)) }
+    var tileHover: NSColor   { pick(Palette.hex(0xFFFFFF, 0.115), Palette.hex(0xFFFFFF, 1.0)) }
+    var tileEdge: NSColor    { pick(Palette.hex(0xFFFFFF, 0.07), Palette.hex(0x000000, 0.04)) }
+    var tileShadow: CGFloat  { dark ? 0.0 : 0.10 }
 }
 
 // The 8-bit mark, drawn procedurally on integer pixel grids (see the design
@@ -810,7 +819,371 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
     }
 }
 
+// One tile in the pop-out gallery: a quiet rounded card. Status reads as color
+// rather than chrome — a soft wash of the status hue falling from the top (where
+// the glyph sits), plus that hue as an edge for the two states that need you.
+// Inside: status glyph (the same animated spark as the rows) + meta / turn clock,
+// the chat title, repo (+ host). Hover swaps the meta for a remove ✕; rename /
+// reorder stay in the dropdown. A click routes to the chat exactly like a row.
+final class GalleryTileView: NSView {
+    static let size = NSSize(width: 96, height: 96)
+    static let sparkSide: CGFloat = 16
+    static let radius: CGFloat = 9
+    var onClick: (() -> Void)?
+    var onDelete: (() -> Void)?
+    private let theme: Theme
+    private let meta = NSTextField(labelWithString: "")
+    // An image, not a button: the tile claims every hit, so mouseUp tests this
+    // rect itself.
+    private let closeIcon = NSImageView()
+    private var sparkView: NSImageView?
+    private var turnRef: Date?
+    private var animates = false
+
+    init(chat: Chat, title: String, theme: Theme) {
+        self.theme = theme
+        super.init(frame: NSRect(origin: .zero, size: Self.size))
+        let W = Self.size.width, H = Self.size.height
+        wantsLayer = true
+        layer?.cornerRadius = Self.radius
+        layer?.backgroundColor = theme.tileBg.cgColor
+        layer?.borderWidth = 1
+        let sh = NSShadow()
+        sh.shadowColor = NSColor.black.withAlphaComponent(theme.tileShadow)
+        sh.shadowBlurRadius = 3
+        sh.shadowOffset = NSSize(width: 0, height: -1)
+        shadow = sh
+
+        // (hue, wash strength at the top). Finished gets the faintest wash,
+        // idle none, so the cards that want attention carry the most color.
+        let attention = chat.status == "needs_input" || chat.status == "error"
+        let tint: (NSColor, CGFloat)?
+        switch chat.status {
+        case "needs_input": tint = (Palette.needs, 0.22)
+        case "error": tint = (Palette.errorDot, 0.20)
+        case "working": tint = (Palette.clay, theme.dark ? 0.17 : 0.14)
+        case "done": tint = (Palette.done, theme.dark ? 0.10 : 0.09)
+        default: tint = nil
+        }
+        layer?.borderColor = (attention ? tint!.0.withAlphaComponent(0.65) : theme.tileEdge).cgColor
+        if let (hue, top) = tint {
+            let wash = CAGradientLayer()
+            wash.frame = bounds
+            wash.cornerRadius = Self.radius
+            wash.colors = [hue.withAlphaComponent(top).cgColor, hue.withAlphaComponent(0).cgColor]
+            wash.startPoint = CGPoint(x: 0.5, y: 1)   // layer space is y-up: 1 = top
+            wash.endPoint = CGPoint(x: 0.5, y: 0.15)
+            layer?.addSublayer(wash)
+        }
+
+        // Same glyph vocabulary as the rows: spark = working, check =
+        // finished, colored dot = attention, dim dot = idle.
+        let side = Self.sparkSide
+        let gy = H - 9 - side
+        switch chat.status {
+        case "working":
+            let s = NSImageView(frame: NSRect(x: 9, y: gy, width: side, height: side))
+            s.image = Spark.working(0, side: side)
+            addSubview(s)
+            sparkView = s
+            animates = !chat.background
+        case "done":
+            let check = NSImageView(frame: NSRect(x: 9, y: gy, width: side, height: side))
+            check.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "finished")?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .bold))
+            check.contentTintColor = Palette.done
+            addSubview(check)
+        default:
+            let color = chat.status == "needs_input" ? Palette.needs
+                : chat.status == "error" ? Palette.errorDot : theme.idleDot
+            let dot = NSView(frame: NSRect(x: 13, y: gy + (side - 8) / 2, width: 8, height: 8))
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = 4
+            dot.layer?.backgroundColor = color.cgColor
+            addSubview(dot)
+            if chat.status == "live" { alphaValue = 0.62 }
+        }
+
+        // Meta beside the glyph, right-aligned. A square has no room for the
+        // rows' full status words, so it uses short forms — the glyph and the
+        // wash already say which state this is.
+        if chat.status == "working" && !chat.background {
+            turnRef = chat.activityDate
+            meta.stringValue = elapsed(chat.activityDate)
+            meta.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        } else {
+            meta.stringValue = Self.shortMeta(for: chat)
+            meta.font = .systemFont(ofSize: 10, weight: .medium)
+        }
+        meta.textColor = metaColor(for: chat) ?? theme.textMuted
+        meta.alignment = .right
+        meta.lineBreakMode = .byTruncatingTail
+        let mx = 9 + side + 4
+        meta.frame = NSRect(x: mx, y: gy + 1, width: W - mx - 10, height: 13)
+        addSubview(meta)
+        closeIcon.image = NSImage(systemSymbolName: "xmark.circle.fill",
+                                  accessibilityDescription: "Remove from list")
+        closeIcon.contentTintColor = theme.textSecond
+        closeIcon.frame = NSRect(x: W - 9 - 14, y: gy + 1, width: 14, height: 14)
+        closeIcon.isHidden = true
+        addSubview(closeIcon)
+
+        let t = NSTextField(wrappingLabelWithString: title)
+        t.isSelectable = false
+        t.font = .systemFont(ofSize: 12, weight: .semibold)
+        t.textColor = theme.textPrimary
+        // Word-wrap (a truncating line-break mode would pin it to one line);
+        // only the last visible line gets the ellipsis.
+        t.maximumNumberOfLines = 3
+        t.lineBreakMode = .byWordWrapping
+        t.cell?.truncatesLastVisibleLine = true
+        t.frame = NSRect(x: 8, y: 22, width: W - 16, height: gy - 3 - 22)
+        addSubview(t)
+
+        var where_ = chat.repo
+        if chat.host == "terminal" { where_ += " · \(chat.hostApp.isEmpty ? "CLI" : chat.hostApp)" }
+        let repo = NSTextField(labelWithString: where_)
+        repo.font = .systemFont(ofSize: 9.5)
+        repo.textColor = theme.textMuted
+        repo.lineBreakMode = .byTruncatingMiddle
+        repo.frame = NSRect(x: 8, y: 7, width: W - 16, height: 12)
+        addSubview(repo)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    static func shortMeta(for chat: Chat) -> String {
+        switch chat.status {
+        case "working": return "bg tasks"   // foreground turns show the clock
+        case "needs_input":
+            switch chat.waitingKind {
+            case "permission": return "permission"
+            case "question": return "question"
+            case "reply": return "reply"
+            case "mcp": return "MCP form"
+            default: return "needs you"
+            }
+        case "error": return "error · \(age(chat.activityDate))"
+        case "done": return age(chat.activityDate)
+        case "live": return "idle"
+        default: return chat.status
+        }
+    }
+
+    // The gallery window drags by its background; a tile is a click target, so
+    // it claims every hit inside it (labels would otherwise start a window drag).
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = theme.tileHover.cgColor
+        meta.isHidden = true
+        closeIcon.isHidden = false
+    }
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = theme.tileBg.cgColor
+        meta.isHidden = false
+        closeIcon.isHidden = true
+    }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(p) else { return }
+        // A generous target around the ✕ — it's small, and a miss would jump
+        // to the chat instead.
+        if !closeIcon.isHidden, closeIcon.frame.insetBy(dx: -5, dy: -5).contains(p) {
+            onDelete?()
+        } else {
+            onClick?()
+        }
+    }
+
+    func animTick(_ frame: Int) {
+        guard animates else { return }
+        sparkView?.image = Spark.working(frame, side: Self.sparkSide)
+        if let t = turnRef { meta.stringValue = elapsed(t) }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    // Pop-out gallery: a floating, draggable grid of tiles that stays up while
+    // you work (the dropdown dismisses on any outside click). Shares the poll
+    // and the animation clock; its open state and top-left corner persist.
+    var gallery: NSPanel?
+    var galleryTiles: [GalleryTileView] = []
+    var galleryFingerprint = ""
+    var galleryHotKeyRef: EventHotKeyRef?
+
+    var galleryOpen: Bool {
+        get { UserDefaults.standard.bool(forKey: "galleryOpen") }
+        set { UserDefaults.standard.set(newValue, forKey: "galleryOpen") }
+    }
+
+    func galleryTitle(for chat: Chat) -> String {
+        if let l = labels[chat.sessionId], !l.isEmpty { return l }
+        return summaryText(for: chat) ?? ChatCardView.displayName(chat)
+    }
+
+    // Everything a tile shows that the row fingerprint doesn't cover: the
+    // resolved title (label / summary), the host badge, and light vs dark.
+    func galleryPrint() -> String {
+        let dark = gallery.map { Theme($0.effectiveAppearance).dark } ?? false
+        return "\(dark)\n" + fingerprint() + "\n"
+            + chats.map { "\(galleryTitle(for: $0))|\($0.hostApp)" }.joined(separator: "\n")
+    }
+
+    func makeGallery() -> NSPanel {
+        let g = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 140),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: true)
+        g.level = .floating
+        g.isOpaque = false
+        g.backgroundColor = .clear
+        g.hasShadow = true
+        g.hidesOnDeactivate = false
+        g.isMovableByWindowBackground = true
+        g.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: g, queue: .main) { _ in
+            UserDefaults.standard.set("\(g.frame.minX),\(g.frame.maxY)", forKey: "galleryTopLeft")
+        }
+        return g
+    }
+
+    func setGallery(visible: Bool) {
+        galleryOpen = visible
+        if visible {
+            if gallery == nil { gallery = makeGallery() }
+            refreshGallery()
+            gallery?.orderFrontRegardless()
+        } else {
+            gallery?.orderOut(nil)
+        }
+    }
+
+    @objc func toggleGallery(_ sender: Any?) {
+        setGallery(visible: !(gallery?.isVisible ?? false))
+        if panel.isVisible { refreshPanel(); positionPanel() }  // keep its toggle in step
+    }
+
+    // Rebuild the open gallery only when what it shows has changed.
+    func syncGallery() {
+        guard let g = gallery, g.isVisible, galleryPrint() != galleryFingerprint else { return }
+        refreshGallery()
+    }
+
+    func refreshGallery() {
+        guard let g = gallery else { return }
+        let theme = Theme(g.effectiveAppearance)
+        galleryFingerprint = galleryPrint()
+        let pad: CGFloat = 10, gap: CGFloat = 7, headerH: CGFloat = 30
+        let ts = GalleryTileView.size
+        // defaults write com.measure.chatstatus galleryColumns -int <n>
+        let pref = UserDefaults.standard.integer(forKey: "galleryColumns")
+        let maxCols = pref > 0 ? pref : 3
+        let n = chats.count
+        // At least two columns wide (unless pinned to one) so a lone chat
+        // doesn't make a sliver of a window.
+        let cols = maxCols == 1 ? 1 : min(max(n, 2), maxCols)
+        let rows = max(1, Int((Double(n) / Double(cols)).rounded(.up)))
+        let W = pad * 2 + CGFloat(cols) * ts.width + CGFloat(cols - 1) * gap
+        let bodyH = n == 0 ? 34 : CGFloat(rows) * ts.height + CGFloat(rows - 1) * gap
+        let H = headerH + bodyH + pad
+
+        let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        root.material = .popover
+        root.blendingMode = .behindWindow
+        root.state = .active
+        root.wantsLayer = true
+        root.layer?.cornerRadius = 17
+        root.layer?.masksToBounds = true
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = theme.border.cgColor
+        let tint = NSView(frame: root.bounds)
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = theme.galleryBg.cgColor
+        root.addSubview(tint)
+
+        // Header: just the panes mark and the counts — no title, and a small
+        // quiet close. The strip doubles as the drag handle.
+        let mark = NSImageView(frame: NSRect(x: 12, y: H - 21, width: 11, height: 11))
+        mark.image = PixelMark.menuGlyph(side: 11)
+        mark.contentTintColor = theme.textMuted
+        root.addSubview(mark)
+        let counts = NSTextField(labelWithAttributedString: headerCounts(theme))
+        counts.lineBreakMode = .byClipping
+        counts.frame = NSRect(x: 30, y: H - 23, width: W - 30 - 30, height: 16)
+        root.addSubview(counts)
+        let close = headerButton("xmark", "Close gallery", #selector(toggleGallery(_:)))
+        close.image = close.image?.withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        close.contentTintColor = theme.textMuted
+        close.setFrameOrigin(NSPoint(x: W - 30, y: H - 26))
+        root.addSubview(close)
+
+        galleryTiles = []
+        if n == 0 {
+            let empty = NSTextField(labelWithString: "No active chats")
+            empty.font = .systemFont(ofSize: 12)
+            empty.textColor = theme.textSecond
+            empty.alignment = .center
+            empty.frame = NSRect(x: 0, y: pad + 8, width: W, height: 18)
+            root.addSubview(empty)
+        }
+        for (i, chat) in chats.enumerated() {
+            let tile = GalleryTileView(chat: chat, title: galleryTitle(for: chat), theme: theme)
+            let r = i / cols, c = i % cols
+            tile.setFrameOrigin(NSPoint(
+                x: pad + CGFloat(c) * (ts.width + gap),
+                y: H - headerH - CGFloat(r + 1) * ts.height - CGFloat(r) * gap))
+            let detail = ChatCardView.detail(for: chat).0
+            tile.toolTip = detail.isEmpty ? chat.cwd : "\(detail)\n\(chat.cwd)"
+            tile.onClick = { [weak self] in
+                self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId,
+                              host: chat.host, hostPid: chat.hostPid)
+            }
+            // Same as the row's ✕: drops the status file. The session itself
+            // is untouched, so its next hook event brings the tile back.
+            tile.onDelete = { [weak self] in
+                try? FileManager.default.removeItem(
+                    at: statusDir.appendingPathComponent("\(chat.sessionId).json"))
+                self?.poll()
+            }
+            root.addSubview(tile)
+            galleryTiles.append(tile)
+        }
+
+        // Anchor the top-left corner so the window grows down/right as chats
+        // come and go. A saved corner that's no longer on any screen (display
+        // unplugged) falls back to the top-right of the main screen.
+        var tl: NSPoint?
+        if let s = UserDefaults.standard.string(forKey: "galleryTopLeft") {
+            let p = s.split(separator: ",").compactMap { Double($0) }
+            if p.count == 2 {
+                let pt = NSPoint(x: p[0], y: p[1])
+                if NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(pt) }) {
+                    tl = pt
+                }
+            }
+        }
+        if tl == nil, let vis = NSScreen.main?.visibleFrame {
+            tl = NSPoint(x: vis.maxX - W - 16, y: vis.maxY - 16)
+        }
+        let o = tl ?? NSPoint(x: 100, y: 600)
+        g.contentView = root
+        g.setFrame(NSRect(x: o.x, y: o.y - H, width: W, height: H), display: true)
+        g.invalidateShadow()
+    }
+
     var statusItem: NSStatusItem!
     let menuGlyph = PixelMark.menuGlyph(side: 15)  // leading brand mark; shown only when idle
     var chats: [Chat] = []
@@ -969,6 +1342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     self.summaryCache[key] = (h, r)
                     self.saveSummaryCache()
                     if self.panel.isVisible { self.refreshPanel(); self.positionPanel() }
+                    self.syncGallery()
                 }
             }
         }
@@ -1025,6 +1399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         loadLabels()
         loadCardOrder()
         poll()
+        if galleryOpen { setGallery(visible: true) }
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -1110,6 +1485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 positionPanel()
             }
         }
+        syncGallery()
     }
 
     func fingerprint() -> String {
@@ -1194,6 +1570,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if panel.isVisible {
             for c in liveCards { c.animTick(animFrame) }
         }
+        if gallery?.isVisible == true {
+            for t in galleryTiles { t.animTick(animFrame) }
+        }
     }
 
     // --- Custom dropdown panel (frosted, rounded, non-native) ---
@@ -1215,9 +1594,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func registerHotkey() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            // Two hotkeys share this handler: id 1 = dropdown, id 2 = gallery.
+            var hk = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                              EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &hk)
+            let id = hk.id
             DispatchQueue.main.async {
                 guard let d = NSApp.delegate as? AppDelegate else { return }
+                if id == 2 { d.toggleGallery(nil); return }
                 if d.panel.isVisible { d.hidePanel() } else { d.showPanel() }
             }
             return noErr
@@ -1229,6 +1615,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             ?? UInt32(controlKey | optionKey)
         let hkid = EventHotKeyID(signature: OSType(0x43485354), id: 1)  // 'CHST'
         RegisterEventHotKey(key, mods, hkid, GetApplicationEventTarget(), 0, &hotKeyRef)
+        // Gallery toggle, default ⌃⌥⇧C (the dropdown's key plus Shift); rebind via galleryHotkeyKeyCode /
+        // galleryHotkeyModifiers the same way.
+        let gKey = (defaults.object(forKey: "galleryHotkeyKeyCode") as? NSNumber)?.uint32Value
+            ?? UInt32(kVK_ANSI_C)
+        let gMods = (defaults.object(forKey: "galleryHotkeyModifiers") as? NSNumber)?.uint32Value
+            ?? UInt32(controlKey | optionKey | shiftKey)
+        RegisterEventHotKey(gKey, gMods, EventHotKeyID(signature: OSType(0x43485354), id: 2),
+                            GetApplicationEventTarget(), 0, &galleryHotKeyRef)
     }
 
     // ANSI virtual key codes → their key cap, for the shortcut hint. Covers the
@@ -1268,6 +1662,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             menu.addItem(i)
         }
         item("Clear Finished", #selector(clearFinished(_:)))
+        item(gallery?.isVisible == true ? "Hide Gallery" : "Pop Out Gallery",
+             #selector(toggleGallery(_:)))
         item(manualOrder ? "Automatic Order" : "Manual Order",
              #selector(toggleManualOrder(_:)))
         item(notificationsEnabled ? "Pause Notifications" : "Resume Notifications",
@@ -1425,6 +1821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.saveLabels()
                 self.refreshPanel()
                 self.positionPanel()
+                self.syncGallery()
             }
             card.reorderable = manualOrder
             card.onReorderBegin = { [weak self, weak card] e in self?.reorderBegin(card, event: e) }
@@ -1476,6 +1873,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }),
         ]
+        // Shows / hides the floating gallery; changes nothing in this panel.
+        optionRows.append(("Pop-out gallery", gallery?.isVisible ?? false, { [weak self] on in
+            self?.setGallery(visible: on) }))
         if summariesAvailable {
             optionRows.append(("AI summaries", summariesEnabled, { [weak self] on in
                 guard let self else { return }
@@ -1728,6 +2128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         summariesEnabled.toggle()
         if summariesEnabled { chats.forEach { ensureSummary(for: $0) } }
         if panel.isVisible { refreshPanel(); positionPanel() }
+        syncGallery()
     }
 
     @objc func toggleManualOrder(_ sender: Any?) {

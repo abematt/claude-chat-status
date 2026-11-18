@@ -41,6 +41,7 @@ Idempotent, clone-anywhere. Requires macOS and [`jq`](https://jqlang.github.io/j
 - **Hover a card** to rename (✎ — your label replaces repo · branch everywhere, including notifications) or remove (✕).
 - **Cards sort automatically** — needs-you first, then working, finished, idle. Flip **Auto order** off in Options and drag cards into your own order (it persists; new chats drop in on top).
 - **A finish with background tasks still running isn't "finished"** — the card shows *background* and completes for real when the work stops.
+- **Pop-out gallery** — **⌃⌥⇧C** (or the Options switch) floats a draggable grid of tiles, one per chat, that stays up while you work; click a tile to jump to its chat.
 - **⌃⌥C** toggles the panel from anywhere · **Esc** closes it · **right-click** the menu bar item for a quick menu. Rebind the hotkey: `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` (+ `hotkeyModifiers`).
 - Chats whose Claude process died without a clean exit are reaped in seconds (PID + start-time check); anything silent for 24h is pruned.
 

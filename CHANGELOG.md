@@ -3,6 +3,24 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.10.0 — 2026-11-18
+
+A pop-out gallery that stays on screen while you work.
+
+- **Pop-out gallery**: a floating, draggable grid of small square cards, one
+  per chat. Each card takes a soft wash of its status colour — clay while
+  working (with the animated spark and a live turn clock), green when finished,
+  orange or red with a matching edge when a chat needs you or errored. Click a
+  card to jump to the chat. Toggle with **⌃⌥⇧C**, the "Pop-out gallery" OPTIONS
+  switch, or the right-click menu; open state and position persist across
+  launches.
+- Hover a tile for a ✕ that removes it from the list — handy for hosts with no
+  way to close a session. Rename and reorder stay in the dropdown, and the
+  gallery follows the dropdown's order.
+- `defaults write com.measure.chatstatus galleryColumns -int <n>` sets the
+  column count (default 3); `galleryHotkeyKeyCode` / `galleryHotkeyModifiers`
+  rebind the shortcut.
+
 ## 0.9.0 — 2026-07-13
 
 Card ordering you control, plus a discoverable toggle shortcut.
