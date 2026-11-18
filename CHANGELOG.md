@@ -3,6 +3,33 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.12.0 — 2026-11-18
+
+Chat Status inside bb, and answering bb from the pop-out.
+
+- **Cards name the repos a chat is working in.** A chat opened on a workspace
+  folder of many repos used to show only that folder. The card now shows the
+  repo its latest tool calls touched, with a count of any others
+  (`measure-web +2`); hover a gallery card for the full list. A turn with no
+  tool calls keeps the previous repos. Clicks still open the folder the chat
+  started in. A repo shows once the chat has edited a file in it or touched
+  it twice in the turn, so a single `ls` of a neighbouring repo does not put
+  it on the card.
+- **bb chats use bb's own title.** bb names each thread with its AI service,
+  from the whole conversation. A bb card now shows that title instead of the
+  on-device summary of one prompt, and shows it even with summaries off. A
+  label you set by hand still wins.
+- **bb sidebar plugin** (`bb-plugin-chat-status/`). Each bb thread row shows
+  its project in the project's color, a live turn clock while the agent
+  works, and what it is blocked on while it waits. A *Chats outside bb* item
+  in the sidebar footer lists the chats running in VS Code or a terminal;
+  click one to jump to it. Install steps are in the plugin's README.
+- **Allow or deny a bb permission from the pop-out.** Hover a bb card that is
+  waiting on a permission and its foot shows *Deny* and *Allow*. They answer
+  the prompt through bb, so you stay in the app you are in. If bb has nothing
+  to approve (the chat was asking a question, or you already answered), the
+  click opens the thread instead.
+
 ## 0.11.0 — 2026-11-18
 
 Codex chats, exact-thread clicks for bb, and cards you can tell apart at a
