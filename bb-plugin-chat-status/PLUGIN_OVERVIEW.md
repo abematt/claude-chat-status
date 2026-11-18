@@ -4,7 +4,8 @@ running outside bb.
 ## What you get
 
 - On each thread row: the project in its own color, a live turn clock while
-  the agent works, and what it is blocked on while it waits for you.
+  the agent works, and what it is blocked on while it waits for you. Other
+  rows show how long ago the chat last ran, with recent ones in green.
 - A **Chats outside bb** item in the sidebar footer that lists the chats
   running in VS Code or a terminal. Click one to jump to it.
 

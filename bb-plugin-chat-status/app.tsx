@@ -93,15 +93,26 @@ function formatClock(seconds: number): string {
     : `${minutes}:${secs}`;
 }
 
-/** Epoch seconds, re-rendering every second while `ticking`. */
-function useNow(ticking: boolean): number {
+/** How long ago, as the menu bar app writes it: "now", "4m ago", "2h ago", "3d ago". */
+function formatAge(seconds: number): string {
+  if (seconds < 60) return "now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
+/** A chat that stopped this recently still reads as current work. */
+const RECENT_SECONDS = 15 * 60;
+
+/** Epoch seconds, re-rendering every `intervalMs` while `ticking`. */
+function useNow(ticking: boolean, intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {
     if (!ticking) return;
     setNow(Date.now() / 1000);
-    const timer = setInterval(() => setNow(Date.now() / 1000), 1000);
+    const timer = setInterval(() => setNow(Date.now() / 1000), intervalMs);
     return () => clearInterval(timer);
-  }, [ticking]);
+  }, [ticking, intervalMs]);
   return now;
 }
 
@@ -151,6 +162,8 @@ function useChats(): ChatsState & { rpc: ReturnType<typeof useRpc<typeof rpcCont
 interface RowData extends ChatsState {
   /** Projects with no repository of their own; their folders are thread ids. */
   personalProjectIds: ReadonlySet<string>;
+  /** Epoch seconds, refreshed twice a minute: one clock for every row's age. */
+  coarseNow: number;
 }
 
 /**
@@ -205,6 +218,61 @@ function ProjectName({
   );
 }
 
+interface RowDetail {
+  text: string;
+  /** A status color, or undefined for quiet text. */
+  hue: string | undefined;
+  numeric: boolean;
+}
+
+/**
+ * What follows the project on a row. A working chat shows its turn clock and
+ * a waiting one what it waits on. Everything else shows how long ago it last
+ * ran: in color while that is recent, quiet once it is old, so current work
+ * stands apart from the backlog.
+ */
+function rowDetail(
+  thread: PluginSidebarThread,
+  chat: Chat | undefined,
+  now: number,
+): RowDetail | null {
+  if (chat !== undefined) {
+    if (isWorking(chat) && chat.turnStartedAt > 0) {
+      return {
+        text: formatClock(now - chat.turnStartedAt),
+        hue: STATUS_HUE.working,
+        numeric: true,
+      };
+    }
+    if (chat.status === "needs_input") {
+      return chat.waitingOn === ""
+        ? null // bb's own glyph already says it is waiting
+        : { text: chat.waitingOn, hue: STATUS_HUE.needs_input, numeric: false };
+    }
+    if (chat.status === "working") return null; // background work: no clock to show
+    if (chat.updatedAt > 0) {
+      const age = Math.max(0, now - chat.updatedAt);
+      const recent = age < RECENT_SECONDS;
+      return chat.status === "error"
+        ? { text: `failed ${formatAge(age)}`, hue: STATUS_HUE.error, numeric: true }
+        : {
+            text: formatAge(age),
+            hue: recent && chat.status === "done" ? STATUS_HUE.done : undefined,
+            numeric: true,
+          };
+    }
+    return null;
+  }
+  // No status file (an older thread, or a provider without the hook): bb's
+  // own record of when the thread last finished or asked for attention.
+  if (thread.status !== "idle" || thread.latestAttentionAt <= 0) return null;
+  return {
+    text: formatAge(Math.max(0, now - thread.latestAttentionAt / 1000)),
+    hue: undefined,
+    numeric: true,
+  };
+}
+
 function ThreadRowStatus({
   thread,
   data,
@@ -214,15 +282,7 @@ function ThreadRowStatus({
   const now = useNow(working && chat.turnStartedAt > 0);
   const projects = threadProjects(thread, chat, data.personalProjectIds);
   const repo = projects[0] ?? "";
-  // Only the two states that carry more than bb's own status glyph does.
-  const detail =
-    chat === undefined
-      ? null
-      : working && chat.turnStartedAt > 0
-        ? { text: formatClock(now - chat.turnStartedAt), hue: STATUS_HUE.working, numeric: true }
-        : chat.status === "needs_input" && chat.waitingOn !== ""
-          ? { text: chat.waitingOn, hue: STATUS_HUE.needs_input, numeric: false }
-          : null;
+  const detail = rowDetail(thread, chat, working ? now : data.coarseNow);
   if (repo === "" && detail === null) return null;
   return (
     <span
@@ -238,7 +298,11 @@ function ThreadRowStatus({
       )}
       {detail === null ? null : (
         <span
-          className={cn("min-w-0 truncate", detail.numeric && "tabular-nums")}
+          className={cn(
+            "min-w-0 truncate",
+            detail.numeric && "tabular-nums",
+            detail.hue === undefined && "text-muted-foreground",
+          )}
           style={{ color: detail.hue }}
         >
           {detail.text}
@@ -358,7 +422,8 @@ export default definePluginApp((app) => {
           ),
         [projects],
       );
-      return { ...state, personalProjectIds };
+      const coarseNow = useNow(true, 30_000);
+      return { ...state, personalProjectIds, coarseNow };
     },
     component: ThreadRowStatus,
   });

@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { startFeed } from "./feed";
 
 const chatSchema = z.object({
   sessionId: z.string(),
@@ -244,6 +245,17 @@ export default async function plugin(bb: BbPluginApi) {
     // No status directory yet: the UI still polls.
     bb.log.warn(`not watching ${statusDir()}: ${String(error)}`);
   }
+
+  // Cards for bb threads from bb's own events (feed.ts). On by default;
+  // `bb plugin config chat-status set feed false` turns it off.
+  const settings = bb.settings.define({
+    feed: {
+      type: "boolean",
+      label: "Make cards from bb's thread events",
+      default: true,
+    },
+  });
+  if ((await settings.get()).feed) startFeed(bb, statusDir);
 
   bb.onDispose(() => {
     watcher?.close();

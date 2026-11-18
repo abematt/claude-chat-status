@@ -21,9 +21,17 @@ Chat Status inside bb, and answering bb from the pop-out.
   label you set by hand still wins.
 - **bb sidebar plugin** (`bb-plugin-chat-status/`). Each bb thread row shows
   its project in the project's color, a live turn clock while the agent
-  works, and what it is blocked on while it waits. A *Chats outside bb* item
+  works, and what it is blocked on while it waits. Other rows show how long
+  ago the chat last ran: green within 15 minutes of finishing, quiet after
+  that, so current work stands apart from the backlog. A *Chats outside bb* item
   in the sidebar footer lists the chats running in VS Code or a terminal;
   click one to jump to it. Install steps are in the plugin's README.
+- **Cards from bb's own events.** The plugin now listens to bb's thread
+  events. A bb thread whose agent has no hook gets a full card: working,
+  needs you, failed, finished. For Claude and Codex threads, which the hook
+  already covers, it fills two gaps: a question or form bb is waiting on, and
+  a turn bb reports as failed. Turn it off with
+  `bb plugin config chat-status set feed false`.
 - **Allow or deny a bb permission from the pop-out.** Hover a bb card that is
   waiting on a permission and its foot shows *Deny* and *Allow*. They answer
   the prompt through bb, so you stay in the app you are in. If bb has nothing

@@ -2,15 +2,33 @@
 
 A [bb](https://getbb.app) plugin that puts Chat Status in bb's sidebar. It
 reads the status files the hook in this repo writes
-(`~/.claude/chat-status/<session_id>.json`) and never writes them.
+(`~/.claude/chat-status/<session_id>.json`). Its events feed (below) also
+writes them for bb threads.
 
 - **Thread rows** get a metadata item: the project in its color, then the turn
   clock while the chat works, or what it is blocked on while it waits.
+  Otherwise it shows how long ago the chat last ran, in green for 15 minutes
+  after it finishes and quiet after that.
 - **Sidebar footer** gets a *Chats outside bb* item listing the chats running
   in VS Code or a terminal. A click routes to the chat the way a card does.
 
 Project colors come from the menu bar app's `projectColors` preference, so a
 repo has the same color here as on its card.
+
+## Cards from bb's events
+
+`feed.ts` listens to bb's thread events and writes status files itself, so
+the menu bar app and the pop-out show bb threads the hook does not reach.
+
+- No hook file for the thread: the feed owns `bb-<threadId>.json` and writes
+  the whole card.
+- The hook covers the thread: the feed leaves that file to the hook and only
+  marks a question or form the hook cannot see, or a turn bb reports failed.
+  It waits three seconds first, so the hook always speaks first.
+
+Turn it off with `bb plugin config chat-status set feed false`, then
+`bb plugin reload chat-status`. `bb plugin logs chat-status` shows each event
+it handled.
 
 ## Install
 

@@ -22,6 +22,7 @@
   },
   "include": [
     "server.ts",
+    "feed.ts",
     "app.tsx",
     "components",
     "lib",
