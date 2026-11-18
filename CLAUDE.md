@@ -19,6 +19,7 @@ A macOS menu bar app showing live status of every Claude Code chat across repos.
 ./install.sh --uninstall   # strip hooks + login item
 ./build/ChatStatus.app/Contents/MacOS/ChatStatus --dump   # print parsed state without the GUI
 touch ~/.claude/chat-status/.debug   # log every raw hook payload to ~/.claude/chat-status/_debug.jsonl
+CHAT_STATUS_DIR=<dir> CHAT_STATUS_APPEARANCE=light|dark <binary>   # run against other status files (demo screenshots)
 ```
 
 There are no tests. To verify changes end-to-end: `./install.sh`, then drive a Claude Code session and watch the JSON files / app. `--dump` and `.debug` are the debugging tools.
@@ -30,6 +31,7 @@ There are no tests. To verify changes end-to-end: `./install.sh`, then drive a C
 **`update_status.py` must never print to stdout.** Hook stdout is interpreted by Claude Code — PermissionRequest output can auto-approve/deny, PreToolUse output can rewrite tool calls. It must also always exit 0 (never block Claude), which is why everything is wrapped in bare try/except.
 
 **State semantics encoded across both files:**
+- Only `UserPromptSubmit` creates a status file. Every other event returns early when the session has no file, so opening or restoring a chat tab never makes a card, and a manually removed card stays gone until the next prompt.
 - `repo`/`branch`/`cwd` are pinned on the session's first write and never overwritten — the card stays attached to the window it opened in even if the chat `cd`s elsewhere. Click routing depends on `host` (the session's topmost ancestor app, detected in the hook's process walk and re-pinned with the PID): `vscode` (or missing, for pre-host files) opens `cwd` in VS Code then deep-links `vscode://anthropic.claude-code/open?session=…`; `terminal` just activates the host app via `host_pid` (no deep link, no tab-level focus — and a tmux server isn't a GUI app to activate).
 - `turn_started_at` is stamped only by UserPromptSubmit; tool events refresh `updated_at` but not the turn clock. The app ages *working* cards from `turn_started_at` and everything else from `updated_at` (see `Chat.activityDate`).
 - `waiting_rich` marks precise blocked-on text (from PermissionRequest / AskUserQuestion) so the generic Notification message that follows doesn't clobber it.

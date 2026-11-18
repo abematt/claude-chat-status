@@ -2,7 +2,7 @@
 """Claude Code hook: maintains per-session status files for the ChatStatus menu bar app.
 
 Registered in ~/.claude/settings.json for these hook events:
-    SessionStart                -> live
+    SessionStart                -> live     (only for a chat that already has a card)
     UserPromptSubmit            -> working  (starts the turn clock; clears waiting/error)
     PostToolUse                 -> tool     (back to working; turn clock keeps running)
     PostToolUseFailure          -> toolfail (still working; bumps fail_streak)
@@ -210,6 +210,14 @@ def main():
             entry = json.load(f)
     except Exception:
         pass
+
+    # Only a prompt creates a card. Merely opening a chat (SessionStart), or
+    # any stray event for a session with no file, must not: an editor that
+    # opens or restores chat tabs would otherwise litter the board with idle
+    # cards nobody typed into. It also makes a manual remove stick until the
+    # next prompt instead of being undone by the turn's next tool event.
+    if not entry and status != "working":
+        return
 
     # repo/branch/cwd are captured once, on the session's first update, and
     # never overwritten: the card stays attached to the window the chat was

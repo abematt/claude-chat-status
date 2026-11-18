@@ -52,8 +52,15 @@ struct Chat {
     }
 }
 
-let statusDir = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".claude/chat-status")
+// CHAT_STATUS_DIR points the app at another directory of status files: a
+// demo set for screenshots, or a scratch dir for testing without live chats.
+let statusDir: URL = {
+    if let dir = ProcessInfo.processInfo.environment["CHAT_STATUS_DIR"], !dir.isEmpty {
+        return URL(fileURLWithPath: dir, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/chat-status")
+}()
 
 // FNV-1a. Stable across launches (String.hashValue is per-process seeded), so
 // the persisted summary cache survives an app relaunch.
@@ -957,7 +964,7 @@ final class GalleryTileView: NSView {
         case "working": return "bg tasks"   // foreground turns show the clock
         case "needs_input":
             switch chat.waitingKind {
-            case "permission": return "permission"
+            case "permission": return "approve"
             case "question": return "question"
             case "reply": return "reply"
             case "mcp": return "MCP form"
@@ -2229,4 +2236,10 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
+// CHAT_STATUS_APPEARANCE=light|dark pins the appearance (screenshots).
+switch ProcessInfo.processInfo.environment["CHAT_STATUS_APPEARANCE"] {
+case "dark": app.appearance = NSAppearance(named: .darkAqua)
+case "light": app.appearance = NSAppearance(named: .aqua)
+default: break
+}
 app.run()

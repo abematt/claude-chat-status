@@ -12,6 +12,8 @@ One glance for what's working, what's blocked, what finished — one click to ju
 
 <img src="docs/screenshot.png" alt="ChatStatus panel" width="560">
 
+<img src="docs/gallery.png" alt="ChatStatus pop-out gallery, light and dark" width="560">
+
 </div>
 
 The menu bar shows a count per status; the panel shows one card per chat — name (AI-summarized), repo · branch, what it's blocked on, and a live turn clock.
@@ -22,7 +24,7 @@ The menu bar shows a count per status; the panel shows one card per chat — nam
 | ● | **needs you** | orange, with the exact blocker — `Bash: git push origin main`, or the question asked |
 | ● | **errored** | red, with the cause (rate limit, auth, overload…) — a dead turn never plays busy |
 | ✓ | **finished** | green, with Claude's closing message so you can triage without opening the chat |
-| ✳ | **idle** | dim — session open, nothing running |
+| ● | **idle** | dim — a chat you have used, reopened and waiting for a prompt |
 
 ## Install
 
@@ -65,8 +67,8 @@ Two components, connected only by JSON files on disk. `install.sh` patches the h
 
 | Hook event | Effect |
 |---|---|
-| `SessionStart` | card appears (*idle*) |
-| `UserPromptSubmit` | *working*; starts the turn clock; clears waiting/error |
+| `SessionStart` | an existing card goes *idle*; never creates one |
+| `UserPromptSubmit` | card appears on the first prompt; *working*; starts the turn clock; clears waiting/error |
 | `PostToolUse` | back to *working* (answered prompts stop being orange) |
 | `PostToolUseFailure` | bumps a fail streak (3+ flags the card) |
 | `PermissionRequest` | *needs permission* + the exact tool/command |
@@ -85,6 +87,7 @@ Two components, connected only by JSON files on disk. `install.sh` patches the h
 ```bash
 ./build/ChatStatus.app/Contents/MacOS/ChatStatus --dump   # parsed state, no GUI
 touch ~/.claude/chat-status/.debug                        # log raw hook payloads → _debug.jsonl
+CHAT_STATUS_DIR=<dir> CHAT_STATUS_APPEARANCE=dark ./build/ChatStatus.app/Contents/MacOS/ChatStatus   # run against demo status files
 ```
 
 > [!TIP]

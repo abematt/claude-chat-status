@@ -3,6 +3,18 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.10.1 — 2026-11-18
+
+- **Opening a chat no longer creates a card.** A card now appears with the
+  first prompt you send. Before, every chat tab an editor opened or restored
+  showed up as an idle card. A chat that already has a card still goes *idle*
+  when its session restarts.
+- Removing a card mid-turn now sticks until that chat's next prompt, instead of
+  the next tool event bringing it back.
+- `CHAT_STATUS_DIR` points the app at another directory of status files, and
+  `CHAT_STATUS_APPEARANCE=light|dark` pins the appearance — for demo
+  screenshots and testing without live chats.
+
 ## 0.10.0 — 2026-11-18
 
 A pop-out gallery that stays on screen while you work.
