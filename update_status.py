@@ -13,6 +13,11 @@ Registered in ~/.claude/settings.json for these hook events:
     Stop                        -> done
     SessionEnd                  -> ended    (removes the status file)
 
+Codex runs the same script from ~/.codex/hooks.json with a second argument,
+`codex` (e.g. `update_status.py working codex`). Its hook payloads share
+Claude's field names. It has no Notification / StopFailure events, and adds
+    Interrupt                   -> interrupt (you stopped the turn: back to idle)
+
 Reads the hook payload JSON from stdin. Writes one JSON file per session to
 ~/.claude/chat-status/<session_id>.json. Always exits 0 so it never blocks Claude.
 
@@ -25,6 +30,7 @@ Debugging: `touch ~/.claude/chat-status/.debug` to append every raw payload to
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -47,11 +53,11 @@ def clear_waiting(entry):
         entry.pop(k, None)
 
 
-def process_info():
+def process_info(agent="claude"):
     """One walk up the hook's ancestry for two facts.
 
     claude: (pid, start_epoch) of the nearest ancestor that looks like the
-    Claude process — lets the app reap sessions whose process died without a
+    agent process (`claude`, or `codex` for Codex sessions) — lets the app reap sessions whose process died without a
     clean SessionEnd (window closed, crash) instead of showing them working
     for the 24h prune; the start time guards against PID reuse.
 
@@ -80,7 +86,7 @@ def process_info():
             ppid, lstart, cmd = procs[cur]
             # Our own hook chain (sh/python running this script) mentions
             # "claude" via the repo path — skip it, not match it.
-            if claude is None and "claude" in cmd.lower() and "update_status.py" not in cmd:
+            if claude is None and agent in cmd.lower() and "update_status.py" not in cmd:
                 started = int(time.mktime(time.strptime(lstart, "%a %b %d %H:%M:%S %Y")))
                 claude = (cur, started)
             top = (cur, cmd)
@@ -100,6 +106,34 @@ def process_info():
     except Exception:
         pass
     return claude, host
+
+
+def bb_thread_for(session_id):
+    """bb thread that owns a Codex session, or "".
+
+    bb drives every Codex thread through one shared `codex app-server`, so
+    there is no per-thread BB_THREAD_ID to inherit. bb's own database links
+    the two: each event row carries the provider's thread id (the Codex
+    session id) beside bb's thread id. Read-only, newest rows first, and any
+    failure (no bb, schema change, locked file) just means no deep link."""
+    try:
+        import sqlite3
+        db = os.path.expanduser("~/.bb/bb.db")
+        if not os.path.exists(db):
+            return ""
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+        try:
+            row = con.execute(
+                "select thread_id from events where provider_thread_id = ? "
+                "order by rowid desc limit 1", (session_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        if row and re.fullmatch(r"thr_[A-Za-z0-9]+", row[0] or ""):
+            return row[0]
+    except Exception:
+        pass
+    return ""
 
 
 def has_background_work(payload):
@@ -176,6 +210,7 @@ def question_text(payload):
 
 def main():
     status = sys.argv[1] if len(sys.argv) > 1 else "live"
+    agent = "codex" if len(sys.argv) > 2 and sys.argv[2] == "codex" else "claude"
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -249,7 +284,7 @@ def main():
     # cheap, and a resumed session gets a fresh process (and possibly a new
     # host) the old values would misrepresent.
     if status in ("live", "working"):
-        info, host = process_info()
+        info, host = process_info(agent)
         if info:
             entry["pid"], entry["pid_started_at"] = info
         if host:
@@ -259,6 +294,27 @@ def main():
             else:
                 entry.pop("host_app", None)
                 entry.pop("host_pid", None)
+        # bb exports its thread id to the agents it runs; with it the app can
+        # ask bb to open the exact thread on click, not just raise the window.
+        bb_thread = os.environ.get("BB_THREAD_ID") or ""
+        if re.fullmatch(r"thr_[A-Za-z0-9]+", bb_thread):
+            entry["bb_thread"] = bb_thread
+        elif agent != "codex":
+            entry.pop("bb_thread", None)
+
+    # Which agent owns the chat: the app labels Codex cards and must not send
+    # a Codex session id to the Claude Code deep link.
+    if agent == "codex":
+        entry["agent"] = "codex"
+
+    # A Codex chat inside bb learns its bb thread from bb's database. Retried
+    # on every event until found: bb may not have written the first event row
+    # when the first prompt's hook runs.
+    if (agent == "codex" and entry.get("host_app") == "bb"
+            and not entry.get("bb_thread")):
+        t = bb_thread_for(sid)
+        if t:
+            entry["bb_thread"] = t
 
     if status == "working":
         # A fresh user prompt starts a new turn; the app measures "working" age
@@ -317,6 +373,12 @@ def main():
         # clobber it with the generic notification message.
         if msg and not entry.get("waiting_rich"):
             entry["waiting_on"] = msg[:160]
+    elif status == "interrupt":
+        # Codex Interrupt: you stopped the turn, and no Stop will follow.
+        status = "live"
+        clear_waiting(entry)
+        entry.pop("fail_streak", None)
+        entry.pop("background", None)
     elif status == "error":
         # StopFailure: the turn died on an API error and Stop will not fire —
         # without this the chat would show "working" forever.

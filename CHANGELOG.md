@@ -3,6 +3,34 @@
 Versions follow semver 0.x — the JSON hook contract and UI are still evolving.
 The app shows its version (from `build.sh`'s Info.plist) in the panel footer.
 
+## 0.11.0 — 2026-11-18
+
+Codex chats, exact-thread clicks for bb, and cards you can tell apart at a
+glance.
+
+- **Project colors.** Every repo gets its own color, shown on the repo name in
+  the dropdown and as a pill on gallery cards. A repo keeps its color for
+  good, and repos on screen together get different ones.
+- **Source icons.** The host app (VS Code, bb, a terminal) shows as its app
+  icon instead of a text tag, with a second icon for Codex chats. Gallery
+  cards now lead with the project, then a two-line title.
+
+- **Codex support.** `install.sh` now also registers the hook in
+  `~/.codex/hooks.json` when Codex is installed, so Codex chats get cards
+  wherever they run: the CLI, the VS Code extension, or bb. Cards are tagged
+  *Codex*. Codex runs a new hook only after you trust it — run `/hooks` in
+  Codex once after installing.
+- Codex has no error or notification hooks, so its cards show working, needs
+  permission, finished and idle (after you interrupt a turn), but not errored.
+  Clicking a Codex card in VS Code focuses the repo window; there is no deep
+  link to the conversation.
+- Codex chats inside bb open their exact thread too. bb shares one Codex
+  process across threads, so the hook finds the thread in bb's database.
+- **Clicking a bb chat opens that thread.** bb exports its thread id to the
+  agents it runs; the hook records it as `bb_thread`, and a click runs
+  `bb thread open <id>` before raising the app. Before, a click only brought
+  bb to the front. Applies from a chat's next prompt.
+
 ## 0.10.1 — 2026-11-18
 
 - **Opening a chat no longer creates a card.** A card now appears with the

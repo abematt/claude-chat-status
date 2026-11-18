@@ -40,6 +40,17 @@ struct Chat {
     let host: String          // "vscode" (deep-linkable) | "terminal" | "" (pre-host files)
     let hostApp: String       // terminal app name, e.g. "iTerm" / "Terminal" / "tmux"
     let hostPid: Int          // terminal app PID, for focus-by-process on click
+    let bbThread: String      // bb thread id when the chat runs inside bb ("" otherwise)
+    let agent: String         // "codex" for Codex chats; "" means Claude Code
+
+    // Small tag after the repo: where the chat lives, and which agent when
+    // it isn't Claude Code. Both change what a click can do.
+    var hostTag: String {
+        var parts: [String] = []
+        if host == "terminal" { parts.append(hostApp.isEmpty ? "CLI" : hostApp) }
+        if agent == "codex" { parts.append("Codex") }
+        return parts.joined(separator: " · ")
+    }
 
     // Text to summarize: what the chat is doing now (latest prompt), else its name.
     var summarySource: String { lastPrompt.isEmpty ? title : lastPrompt }
@@ -190,7 +201,9 @@ func loadChats() -> [Chat] {
             lastMessage: (obj["last_message"] as? String) ?? "",
             host: (obj["host"] as? String) ?? "",
             hostApp: (obj["host_app"] as? String) ?? "",
-            hostPid: (obj["host_pid"] as? Int) ?? 0
+            hostPid: (obj["host_pid"] as? Int) ?? 0,
+            bbThread: (obj["bb_thread"] as? String) ?? "",
+            agent: (obj["agent"] as? String) ?? ""
         ))
     }
     let order = ["needs_input": 0, "error": 1, "working": 2, "live": 3, "done": 4]
@@ -200,6 +213,7 @@ func loadChats() -> [Chat] {
         if a != b { return a < b }
         return $0.updatedAt > $1.updatedAt
     }
+    ProjectStyle.sync(repos: chats.map { $0.repo })
     return chats
 }
 
@@ -392,6 +406,107 @@ enum PixelMark {
 // The Claude spark: the CLI's thinking glyphs cycled as animation frames,
 // rendered into fixed-size images so the menu bar and rows never shift as the
 // glyph changes. The glyph scales with the requested box size.
+// A stable color per project, so a repo is recognized by hue before its name
+// is read. The hues sit away from the status colors (orange, red, clay,
+// green), which keep their meaning; the name hashes to a slot, so a repo
+// keeps its color across launches.
+enum ProjectStyle {
+    private static let hues: [UInt32] = [
+        // Ordered so neighbors differ: slots are handed out first to last.
+        0x3F8CF5,  // blue
+        0xE0609F,  // pink
+        0x1FAE9E,  // teal
+        0xB061E0,  // violet
+        0x8A93A6,  // slate
+        0x2FA3D6,  // cyan
+        0x7A6BF2,  // indigo
+    ]
+    // repo -> palette slot, remembered in UserDefaults so a project keeps its
+    // color for good. A plain hash would do that too, but with seven slots it
+    // hands the same hue to projects that sit side by side.
+    private static var slots: [String: Int] =
+        (UserDefaults.standard.dictionary(forKey: "projectColors") as? [String: Int]) ?? [:]
+    // A demo/test directory must not write its made-up repos into the prefs.
+    private static let persists = ProcessInfo.processInfo.environment["CHAT_STATUS_DIR"] == nil
+
+    // Give every repo on screen a slot. A new repo takes the slot the other
+    // visible repos use least, then the one used least overall.
+    static func sync(repos: [String]) {
+        let live = Array(Set(repos.map { $0.lowercased() })).sorted()
+        var changed = false
+        for repo in live where slots[repo] == nil {
+            var onScreen = [Int](repeating: 0, count: hues.count)
+            for other in live { if let i = slots[other], i < hues.count { onScreen[i] += 1 } }
+            var overall = [Int](repeating: 0, count: hues.count)
+            for i in slots.values where i < hues.count { overall[i] += 1 }
+            let pick = (0..<hues.count).min {
+                (onScreen[$0], overall[$0], $0) < (onScreen[$1], overall[$1], $1)
+            } ?? 0
+            slots[repo] = pick
+            changed = true
+        }
+        if changed && persists { UserDefaults.standard.set(slots, forKey: "projectColors") }
+    }
+    static func hue(for repo: String) -> NSColor {
+        let key = repo.lowercased()
+        let i = slots[key].flatMap { $0 < hues.count ? $0 : nil }
+            ?? Int(stableHash(key) % UInt64(hues.count))
+        return Palette.hex(hues[i])
+    }
+    // Text needs more contrast than a fill: darker on light, lighter on dark.
+    static func text(for repo: String, theme: Theme) -> NSColor {
+        let h = hue(for: repo)
+        return h.blended(withFraction: theme.dark ? 0.30 : 0.28,
+                         of: theme.dark ? .white : .black) ?? h
+    }
+    static func fill(for repo: String, theme: Theme) -> NSColor {
+        hue(for: repo).withAlphaComponent(theme.dark ? 0.22 : 0.15)
+    }
+}
+
+// Where a chat lives and which agent runs it, as app icons: recognized at a
+// glance where the old text tag ("bb · Codex") had to be read. Claude Code is
+// the default agent and gets no icon; Codex borrows the ChatGPT app's.
+enum SourceIcon {
+    private static var cache: [String: NSImage] = [:]
+    private static func bundleIcon(_ ids: [String]) -> NSImage? {
+        for id in ids {
+            if let hit = cache[id] { return hit }
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+                let img = NSWorkspace.shared.icon(forFile: url.path)
+                cache[id] = img
+                return img
+            }
+        }
+        return nil
+    }
+    static func host(for chat: Chat) -> NSImage? {
+        if chat.host == "terminal" {
+            guard chat.hostPid > 0 else { return nil }
+            let key = "pid:\(chat.hostPid)"
+            if let hit = cache[key] { return hit }
+            let img = NSRunningApplication(processIdentifier: pid_t(chat.hostPid))?.icon
+            if let img { cache[key] = img }
+            return img
+        }
+        return bundleIcon(["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"])
+    }
+    static func agent(for chat: Chat) -> NSImage? {
+        chat.agent == "codex" ? bundleIcon(["com.openai.codex", "com.openai.chat"]) : nil
+    }
+    // Icons to draw, in order, plus the text for whatever has no icon.
+    static func marks(for chat: Chat) -> (icons: [NSImage], text: String) {
+        var icons: [NSImage] = []
+        var text: [String] = []
+        if let h = host(for: chat) { icons.append(h) }
+        else if chat.host == "terminal" { text.append(chat.hostApp.isEmpty ? "CLI" : chat.hostApp) }
+        if chat.agent == "codex" {
+            if let a = agent(for: chat) { icons.append(a) } else { text.append("Codex") }
+        }
+        return (icons, text.joined(separator: " · "))
+    }
+}
+
 enum Spark {
     static let glyphs = ["✻", "✽", "✶", "✳", "✢"]
     static var frameCount: Int { glyphs.count }
@@ -595,9 +710,10 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         // paragraph style so an attributed-string label honors it.
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byTruncatingMiddle
+        // The repo carries its project color: the fastest way to tell rows apart.
         let repoAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: theme.textSecond,
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: ProjectStyle.text(for: chat.repo, theme: theme),
             .paragraphStyle: para,
         ]
         let repoText = NSMutableAttributedString(string: chat.repo, attributes: repoAttrs)
@@ -610,9 +726,17 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         }
         // Terminal-hosted chats behave differently on click (focus the app, no
         // deep link) — say where they live so that's not a surprise.
-        if chat.host == "terminal" {
+        let marks = SourceIcon.marks(for: chat)
+        for icon in marks.icons {
+            let att = NSTextAttachment()
+            att.image = icon
+            att.bounds = NSRect(x: 0, y: -2.5, width: 13, height: 13)
+            repoText.append(NSAttributedString(string: "  ", attributes: repoAttrs))
+            repoText.append(NSAttributedString(attachment: att))
+        }
+        if !marks.text.isEmpty {
             repoText.append(NSAttributedString(
-                string: "  \(chat.hostApp.isEmpty ? "CLI" : chat.hostApp)", attributes: [
+                string: "  \(marks.text)", attributes: [
                     .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
                     .foregroundColor: theme.textMuted,
                     .baselineOffset: 1,
@@ -833,7 +957,7 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
 // the chat title, repo (+ host). Hover swaps the meta for a remove ✕; rename /
 // reorder stay in the dropdown. A click routes to the chat exactly like a row.
 final class GalleryTileView: NSView {
-    static let size = NSSize(width: 96, height: 96)
+    static let size = NSSize(width: 106, height: 106)
     static let sparkSide: CGFloat = 16
     static let radius: CGFloat = 9
     var onClick: (() -> Void)?
@@ -935,26 +1059,67 @@ final class GalleryTileView: NSView {
         closeIcon.isHidden = true
         addSubview(closeIcon)
 
+        // Project first: a pill in the repo's own color, right under the
+        // status row. Color and position identify the project before the
+        // name is read; the title drops to supporting text below it.
+        // The name is how a project is recognized, so it shrinks to fit before
+        // it truncates: only a very long repo name ends up with an ellipsis.
+        // +4: a label draws inset from its frame, and without the slack even a
+        // short name gets one.
+        var pillFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        var nameW: CGFloat = 0
+        for size in stride(from: CGFloat(10), through: 8, by: -0.5) {
+            pillFont = .systemFont(ofSize: size, weight: .semibold)
+            nameW = ceil((chat.repo as NSString).size(withAttributes: [.font: pillFont]).width) + 4
+            if nameW + 6 <= W - 10 { break }
+        }
+        let pillW = min(W - 10, nameW + 6)
+        let pill = NSView(frame: NSRect(x: 5, y: gy - 3 - 16, width: pillW, height: 16))
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 5
+        pill.layer?.backgroundColor = ProjectStyle.fill(for: chat.repo, theme: theme).cgColor
+        addSubview(pill)
+        let repo = NSTextField(labelWithString: chat.repo)
+        repo.font = pillFont
+        repo.textColor = ProjectStyle.text(for: chat.repo, theme: theme)
+        repo.lineBreakMode = .byTruncatingMiddle
+        repo.frame = NSRect(x: 3, y: (16 - ceil(pillFont.pointSize + 3)) / 2, width: pillW - 6,
+                            height: ceil(pillFont.pointSize + 3))
+        pill.addSubview(repo)
+
+        // Source at the foot, as icons: host app, then the agent when it
+        // isn't Claude Code. Text only for a host with no icon (tmux, ssh).
+        let marks = SourceIcon.marks(for: chat)
+        var ix = W - 8
+        for icon in marks.icons.reversed() {
+            ix -= 14
+            let iv = NSImageView(frame: NSRect(x: ix, y: 5, width: 14, height: 14))
+            iv.image = icon
+            iv.imageScaling = .scaleProportionallyUpOrDown
+            addSubview(iv)
+            ix -= 3
+        }
+        if !marks.text.isEmpty {
+            let src = NSTextField(labelWithString: marks.text)
+            src.font = .systemFont(ofSize: 9, weight: .medium)
+            src.textColor = theme.textMuted
+            src.alignment = .right
+            src.lineBreakMode = .byTruncatingTail
+            src.frame = NSRect(x: 8, y: 7, width: ix - 8, height: 12)
+            addSubview(src)
+        }
+
         let t = NSTextField(wrappingLabelWithString: title)
         t.isSelectable = false
-        t.font = .systemFont(ofSize: 12, weight: .semibold)
+        t.font = .systemFont(ofSize: 11, weight: .medium)
         t.textColor = theme.textPrimary
         // Word-wrap (a truncating line-break mode would pin it to one line);
         // only the last visible line gets the ellipsis.
-        t.maximumNumberOfLines = 3
+        t.maximumNumberOfLines = 2
         t.lineBreakMode = .byWordWrapping
         t.cell?.truncatesLastVisibleLine = true
-        t.frame = NSRect(x: 8, y: 22, width: W - 16, height: gy - 3 - 22)
+        t.frame = NSRect(x: 8, y: 21, width: W - 16, height: pill.frame.minY - 2 - 21)
         addSubview(t)
-
-        var where_ = chat.repo
-        if chat.host == "terminal" { where_ += " · \(chat.hostApp.isEmpty ? "CLI" : chat.hostApp)" }
-        let repo = NSTextField(labelWithString: where_)
-        repo.font = .systemFont(ofSize: 9.5)
-        repo.textColor = theme.textMuted
-        repo.lineBreakMode = .byTruncatingMiddle
-        repo.frame = NSRect(x: 8, y: 7, width: W - 16, height: 12)
-        addSubview(repo)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -1156,7 +1321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             tile.toolTip = detail.isEmpty ? chat.cwd : "\(detail)\n\(chat.cwd)"
             tile.onClick = { [weak self] in
                 self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId,
-                              host: chat.host, hostPid: chat.hostPid)
+                              host: chat.host, hostPid: chat.hostPid,
+                              bbThread: chat.bbThread, agent: chat.agent)
             }
             // Same as the row's ✕: drops the status file. The session itself
             // is untouched, so its next hook event brings the tile back.
@@ -1809,7 +1975,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             card.onClick = { [weak self] in
                 self?.hidePanel()
                 self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId,
-                              host: chat.host, hostPid: chat.hostPid)
+                              host: chat.host, hostPid: chat.hostPid,
+                              bbThread: chat.bbThread, agent: chat.agent)
             }
             card.onDelete = { [weak self] in
                 try? FileManager.default.removeItem(
@@ -2105,8 +2272,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     //    if open, otherwise resumes the session in the now-focused window.
     // Both opens target VS Code by bundle id so they work regardless of where
     // the app lives (it's in ~/Downloads here, not /Applications).
-    func routeTo(cwd: String, sessionId: String, host: String = "", hostPid: Int = 0) {
+    // bb-hosted chats carry their bb thread id, so bb's own CLI can select the
+    // thread before the app is brought forward. The launcher in ~/.bb/bin is
+    // written by bb and needs nothing on PATH.
+    func routeTo(cwd: String, sessionId: String, host: String = "", hostPid: Int = 0,
+                 bbThread: String = "", agent: String = "") {
         if host == "terminal" {
+            let bbCLI = NSHomeDirectory() + "/.bb/bin/bb"
+            if !bbThread.isEmpty, FileManager.default.isExecutableFile(atPath: bbCLI) {
+                run(bbCLI, ["thread", "open", bbThread])
+            }
             if hostPid > 0, let app = NSRunningApplication(processIdentifier: pid_t(hostPid)),
                !app.isTerminated {
                 app.activate()
@@ -2116,7 +2291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !cwd.isEmpty {
             run("/usr/bin/open", ["-b", "com.microsoft.VSCode", cwd])
         }
-        guard !sessionId.isEmpty else { return }
+        // The deep link belongs to the Claude Code extension; a Codex chat in
+        // VS Code stops at its repo window.
+        guard !sessionId.isEmpty, agent != "codex" else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + (cwd.isEmpty ? 0 : 0.8)) {
             run("/usr/bin/open", ["-b", "com.microsoft.VSCode",
                                   "vscode://anthropic.claude-code/open?session=\(sessionId)"])
@@ -2182,7 +2359,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             content.body = body
             content.sound = .default
             content.userInfo = ["cwd": chat.cwd, "sessionId": chat.sessionId,
-                                "host": chat.host, "hostPid": chat.hostPid]
+                                "host": chat.host, "hostPid": chat.hostPid,
+                                "bbThread": chat.bbThread, "agent": chat.agent]
             // Session-keyed identifier: a chat has at most one live banner —
             // a new ping replaces the previous one, and poll() can withdraw
             // it by id once the state it announced is no longer true.
@@ -2207,7 +2385,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         routeTo(cwd: info["cwd"] as? String ?? "",
                 sessionId: info["sessionId"] as? String ?? "",
                 host: info["host"] as? String ?? "",
-                hostPid: info["hostPid"] as? Int ?? 0)
+                hostPid: info["hostPid"] as? Int ?? 0,
+                bbThread: info["bbThread"] as? String ?? "",
+                agent: info["agent"] as? String ?? "")
         completionHandler()
     }
 
@@ -2225,7 +2405,7 @@ if CommandLine.arguments.contains("--dump") {
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
-        if c.host == "terminal" { line += "\t[\(c.hostApp.isEmpty ? "cli" : c.hostApp)]" }
+        if !c.hostTag.isEmpty { line += "\t[\(c.hostTag)]" }
         if c.status == "done", !c.lastMessage.isEmpty { line += "\t[said: \(c.lastMessage)]" }
         print(line)
     }

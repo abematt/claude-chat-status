@@ -4,7 +4,7 @@
 
 # ChatStatus
 
-**Every Claude Code chat, live in your menu bar.**
+**Every Claude Code and Codex chat, live in your menu bar.**
 
 One glance for what's working, what's blocked, what finished — one click to jump back into the exact conversation in VS Code.
 
@@ -34,15 +34,16 @@ The menu bar shows a count per status; the panel shows one card per chat — nam
 ./install.sh --uninstall  # remove hooks + login item
 ```
 
-Idempotent, clone-anywhere. Requires macOS and [`jq`](https://jqlang.github.io/jq/); conversation deep-links need VS Code with the Claude Code extension (CLI chats in a terminal are tracked too, and clicks focus that terminal instead).
+Idempotent, clone-anywhere. If Codex is installed, its hooks are registered too — run `/hooks` in Codex once to trust them (Codex skips untrusted hooks). Requires macOS and [`jq`](https://jqlang.github.io/jq/); conversation deep-links need VS Code with the Claude Code extension (CLI chats in a terminal are tracked too, and clicks focus that terminal instead).
 
 ## Using it
 
-- **Click a card** (or its notification) → jumps to where the chat lives. VS Code chats focus that repo's window and deep-link the exact conversation via `vscode://anthropic.claude-code/open`; CLI chats focus their terminal app (marked on the card — app-level, no tab focus, and tmux-server sessions can't be focused).
+- **Click a card** (or its notification) → jumps to where the chat lives. VS Code chats focus that repo's window and deep-link the exact conversation via `vscode://anthropic.claude-code/open`; CLI chats focus their terminal app (marked on the card — app-level, no tab focus, and tmux-server sessions can't be focused). Chats run in bb, Claude or Codex, open their exact thread. Codex chats elsewhere (tagged *Codex*) focus their repo window or terminal.
 - **Notifications** fire on *needs you* / *errored* / *finished* — one live banner per chat, withdrawn automatically once you've answered or the state moves on. Left waiting 5 minutes, you get one follow-up ping.
 - **Hover a card** to rename (✎ — your label replaces repo · branch everywhere, including notifications) or remove (✕).
 - **Cards sort automatically** — needs-you first, then working, finished, idle. Flip **Auto order** off in Options and drag cards into your own order (it persists; new chats drop in on top).
 - **A finish with background tasks still running isn't "finished"** — the card shows *background* and completes for real when the work stops.
+- **Projects and sources at a glance** — each repo has its own color, and the host app (VS Code, bb, a terminal) and Codex show as app icons.
 - **Pop-out gallery** — **⌃⌥⇧C** (or the Options switch) floats a draggable grid of tiles, one per chat, that stays up while you work; click a tile to jump to its chat.
 - **⌃⌥C** toggles the panel from anywhere · **Esc** closes it · **right-click** the menu bar item for a quick menu. Rebind the hotkey: `defaults write com.measure.chatstatus hotkeyKeyCode -int <code>` (+ `hotkeyModifiers`).
 - Chats whose Claude process died without a clean exit are reaped in seconds (PID + start-time check); anything silent for 24h is pruned.
@@ -77,6 +78,8 @@ Two components, connected only by JSON files on disk. `install.sh` patches the h
 | `StopFailure` | *errored* + error type — `Stop` never fires on API errors |
 | `Stop` | *finished* + closing message, or *background* while tasks/crons still run |
 | `SessionEnd` | card removed |
+
+Codex uses the same script through `~/.codex/hooks.json`: `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PermissionRequest`, `Stop` and `SessionEnd` map as above, and `Interrupt` returns the card to *idle*. Codex has no `StopFailure` or `Notification` events.
 
 `repo`/`branch`/`cwd` and the Claude PID are pinned on first sight — a chat stays attached to the window it opened in, and a recycled PID can't fake a live session.
 

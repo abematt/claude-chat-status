@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installs ChatStatus: builds the app, registers the Claude Code status hooks in
-# ~/.claude/settings.json, and (optionally) adds a login item so it auto-starts.
+# Installs ChatStatus: builds the app, registers the status hooks for Claude Code
+# (~/.claude/settings.json) and Codex (~/.codex/hooks.json, if present), and (optionally) adds a login item so it auto-starts.
 #
 # Idempotent: safe to re-run. Uses this directory as the source of truth, so it
 # works no matter where you cloned the repo.
@@ -14,6 +14,7 @@ DIR="$(pwd)"
 HOOK="$DIR/update_status.py"
 APP="$DIR/build/ChatStatus.app"
 SETTINGS="$HOME/.claude/settings.json"
+CODEX_HOOKS="$HOME/.codex/hooks.json"
 
 command -v jq >/dev/null || { echo "jq is required (brew install jq)"; exit 1; }
 
@@ -27,6 +28,15 @@ if [[ "${1:-}" == "--uninstall" ]]; then
                            | map(select(.hooks | length > 0)))
             )' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
         echo "Removed chat-status hooks from $SETTINGS"
+    fi
+    if [[ -f "$CODEX_HOOKS" ]]; then
+        tmp="$(mktemp)"
+        jq --arg h "update_status.py" '
+            .hooks |= with_entries(
+                .value |= (map(.hooks |= map(select((.command // "") | contains($h) | not)))
+                           | map(select(.hooks | length > 0)))
+            )' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+        echo "Removed chat-status hooks from $CODEX_HOOKS"
     fi
     osascript -e 'tell application "System Events" to delete (every login item whose name is "ChatStatus")' 2>/dev/null || true
     pkill -x ChatStatus 2>/dev/null || true
@@ -82,6 +92,40 @@ jq \
     | .hooks.Notification     = ((.hooks.Notification // [])     | strip | add($notify))
     ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
 echo "Registered chat-status hooks in $SETTINGS"
+
+# --- register Codex hooks (only when Codex is installed) --------------------
+# Codex's hooks.json has the same shape as Claude's hooks block, and its
+# payloads share Claude's field names, so the same script serves both; the
+# extra `codex` argument tells it which agent is calling. Codex skips a new or
+# changed hook until you trust it, so the first install needs one review.
+if [[ -d "$HOME/.codex" ]]; then
+    [[ -f "$CODEX_HOOKS" ]] || echo '{"hooks":{}}' > "$CODEX_HOOKS"
+    tmp="$(mktemp)"
+    jq \
+        --arg start "$(guarded 'live codex')" \
+        --arg prompt "$(guarded 'working codex')" \
+        --arg tool "$(guarded 'tool codex')" \
+        --arg perm "$(guarded 'permission codex')" \
+        --arg stop "$(guarded 'done codex')" \
+        --arg intr "$(guarded 'interrupt codex')" \
+        --arg end "$(guarded 'ended codex')" \
+        --arg h "update_status.py" '
+        def strip: map(.hooks |= map(select((.command // "") | contains($h) | not)))
+                 | map(select(.hooks | length > 0));
+        def add($cmd; $t): . + [{"hooks":[{"type":"command","command":$cmd,"timeout":$t}]}];
+        .hooks //= {}
+        | .hooks.SessionStart      = ((.hooks.SessionStart // [])      | strip | add($start; 5))
+        | .hooks.UserPromptSubmit  = ((.hooks.UserPromptSubmit // [])  | strip | add($prompt; 5))
+        | .hooks.PostToolUse       = ((.hooks.PostToolUse // [])       | strip | add($tool; 5))
+        | .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) | strip | add($perm; 5))
+        | .hooks.Stop              = ((.hooks.Stop // [])              | strip | add($stop; 5))
+        # Codex caps Interrupt and SessionEnd hooks at 3 seconds.
+        | .hooks.Interrupt         = ((.hooks.Interrupt // [])         | strip | add($intr; 3))
+        | .hooks.SessionEnd        = ((.hooks.SessionEnd // [])        | strip | add($end; 3))
+        ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+    echo "Registered chat-status hooks in $CODEX_HOOKS"
+    echo "  Codex runs a hook only after you trust it: run /hooks in Codex once (or Settings > Hooks in the app)."
+fi
 
 # --- optional login item ---------------------------------------------------
 if [[ "${1:-}" == "--login" ]]; then
