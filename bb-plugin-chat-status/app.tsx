@@ -27,8 +27,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { Chat, WorklogState, rpcContract } from "./server";
 
-/** Same address server.ts starts the hub on (worklog/hub/server.py). */
-const HUB_URL = "http://127.0.0.1:7377/";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -226,7 +224,7 @@ function threadProjects(
   return folder === undefined ? [] : [folder];
 }
 
-// ---- For me: the private tracker (~/.worklog) ----
+// ---- For me: the private tracker (via server.ts and the worklog CLI) ----
 
 /** The tracker's state, refreshed when the store changes and once a minute. */
 function useWorklog(): WorklogState | null {
@@ -365,7 +363,7 @@ function ForMeCard({
       nav.toThread(today.id);
       onNavigate();
     } else {
-      window.open(HUB_URL, "_blank", "noopener");
+      if (worklog.hubUrl) window.open(worklog.hubUrl, "_blank", "noopener");
     }
   };
   return (
@@ -408,14 +406,16 @@ function ForMeCard({
           {total > 0 ? `${done}/${total} today` : `${worklog.counts.week ?? 0} this week`}
           {worklog.mode === "shadow" ? " · shadow" : ""}
         </span>
+        {worklog.hubUrl ? (
         <a
-          href={HUB_URL}
+          href={worklog.hubUrl}
           target="_blank"
           rel="noopener"
           className="rounded px-1 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
         >
           Hub →
         </a>
+        ) : null}
       </div>
     </div>
   );

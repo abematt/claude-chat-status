@@ -5,11 +5,11 @@
 // in app.tsx. It never writes them: the hook owns the files and the menu bar
 // app prunes them. Project colors come from the menu bar app's own
 // preferences, so a repo has the same color here as on its card.
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import { watch, type FSWatcher } from "node:fs";
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { startFeed } from "./feed";
@@ -63,7 +63,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({ sessionId: z.string() }),
     output: z.object({ opened: z.boolean() }),
   },
-  /** The private tracker (~/.worklog, via the `worklog` CLI) for the For me card. */
+  /** The private tracker, read only through the `worklog` CLI, for the For me card. */
   worklog_state: {
     input: z.null(),
     output: worklogStateSchema(),
@@ -92,6 +92,8 @@ function worklogStateSchema() {
     /** Today's For me thread, when the morning check-in has made one. */
     todayThread: z.string(),
     collectorThread: z.string(),
+    /** The hub web page, kept running by `worklog hub ensure`. */
+    hubUrl: z.string(),
   });
 }
 export type WorklogState = z.infer<ReturnType<typeof worklogStateSchema>>;
@@ -201,35 +203,11 @@ async function readPrefsDictionary(key: string): Promise<Record<string, unknown>
 }
 
 // ---- the private tracker ----
+//
+// The `worklog` CLI is the whole contract: this file runs `worklog board --json`
+// and `worklog hub ensure` and never touches the tracker's files or folders.
 
-const WORKLOG_HOME = join(homedir(), ".worklog");
 const WORKLOG_CLI = join(homedir(), ".local", "bin", "worklog");
-const THREAD_ID = /^thr_[A-Za-z0-9]+$/;
-/** The hub web page (worklog/hub/server.py), bound to this Mac only. */
-export const HUB_URL = "http://127.0.0.1:7377/";
-
-async function hubUp(): Promise<boolean> {
-  try {
-    const response = await fetch(`${HUB_URL}healthz`, { signal: AbortSignal.timeout(1500) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** Start the hub next to the worklog CLI unless one is already serving. */
-async function startHub(log: (message: string) => void): Promise<ChildProcess | null> {
-  if (await hubUp()) return null;
-  let script: string;
-  try {
-    script = join(dirname(await realpath(WORKLOG_CLI)), "hub", "server.py");
-  } catch {
-    return null; // no tracker on this machine
-  }
-  const child = spawn("/usr/bin/env", ["python3", script, "--port", "7377"], { stdio: "ignore" });
-  child.on("error", (error) => log(`hub: ${String(error)}`));
-  return child;
-}
 
 async function worklogJson(args: string[]): Promise<unknown> {
   const out = await run(WORKLOG_CLI, args, 10_000);
@@ -240,13 +218,10 @@ async function worklogJson(args: string[]): Promise<unknown> {
   }
 }
 
-async function readThreadId(file: string): Promise<string> {
-  try {
-    const id = (await readFile(join(WORKLOG_HOME, file), "utf8")).trim();
-    return THREAD_ID.test(id) ? id : "";
-  } catch {
-    return "";
-  }
+/** Start the hub page if it isn't serving; returns its address, or "" with no tracker. */
+async function ensureHub(): Promise<string> {
+  const out = (await worklogJson(["hub", "ensure"])) as Record<string, unknown> | null;
+  return out !== null && out.running === true ? str(out.url) : "";
 }
 
 function toItem(raw: unknown) {
@@ -262,11 +237,7 @@ function toItem(raw: unknown) {
 }
 
 async function readWorklog(): Promise<WorklogState> {
-  const [board, todayThread, collectorThread] = await Promise.all([
-    worklogJson(["board", "--json"]),
-    readThreadId("today-thread.txt"),
-    readThreadId("collector-thread.txt"),
-  ]);
+  const [board, hubUrl] = await Promise.all([worklogJson(["board", "--json"]), ensureHub()]);
   const b = (board ?? {}) as Record<string, unknown>;
   const list = (key: string) => (Array.isArray(b[key]) ? (b[key] as unknown[]).map(toItem) : []);
   const counts: Record<string, number> = {};
@@ -286,8 +257,9 @@ async function readWorklog(): Promise<WorklogState> {
     latestCheckin: checkin
       ? { kind: str(checkin.kind), text: str(checkin.text), at: str(checkin.created_at) }
       : null,
-    todayThread,
-    collectorThread,
+    todayThread: str(b.today_thread),
+    collectorThread: str(b.collector_thread),
+    hubUrl,
   };
 }
 
@@ -323,6 +295,7 @@ export default async function plugin(bb: BbPluginApi) {
   const threadMoved = ({ thread }: { thread: { id: string } }) => {
     repoCache.delete(thread.id);
     bb.realtime.publish(CHATS_CHANGED, {});
+    bb.realtime.publish(WORKLOG_CHANGED, {});
   };
   bb.events.on("thread.active", threadMoved);
   bb.events.on("thread.idle", threadMoved);
@@ -409,23 +382,8 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.warn(`not watching ${statusDir()}: ${String(error)}`);
   }
 
-  // The tracker: watch ~/.worklog so the card and hub follow the collector and
-  // check-ins without polling hard. SQLite in WAL mode writes the -wal file.
-  let worklogWatcher: FSWatcher | null = null;
-  let worklogPending: NodeJS.Timeout | null = null;
-  try {
-    worklogWatcher = watch(WORKLOG_HOME, () => {
-      if (worklogPending !== null) return;
-      worklogPending = setTimeout(() => {
-        worklogPending = null;
-        bb.realtime.publish(WORKLOG_CHANGED, {});
-      }, 1000);
-    });
-    worklogWatcher.on("error", () => undefined);
-  } catch {
-    // No tracker on this machine: the card shows nothing.
-  }
-
+  // The tracker has no change feed of its own, so the UI polls worklog_state
+  // (once a minute, and whenever a bb thread moves, below).
   // Cards for bb threads from bb's own events (feed.ts). On by default;
   // `bb plugin config chat-status set feed false` turns it off.
   const settings = bb.settings.define({
@@ -437,13 +395,11 @@ export default async function plugin(bb: BbPluginApi) {
   });
   if ((await settings.get()).feed) startFeed(bb, statusDir);
 
-  const hub = await startHub((message) => bb.log.warn(message));
+  void ensureHub();
 
   bb.onDispose(() => {
     watcher?.close();
     if (pending !== null) clearTimeout(pending);
-    worklogWatcher?.close();
-    hub?.kill();
-    if (worklogPending !== null) clearTimeout(worklogPending);
+
   });
 }
