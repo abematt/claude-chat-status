@@ -136,7 +136,7 @@ def bb_thread_for(session_id):
     return ""
 
 
-REPOS_MAX = 6  # repos shown per chat, most recent first
+REPOS_MAX = 6  # repos shown per chat, most evidence first
 # A repo is shown once the turn has this much evidence for it. A read or a
 # shell mention is worth 1, so a single `ls` of a neighbouring repo does not
 # put it on the card; an edit is worth the full amount, so real work shows at
@@ -457,7 +457,11 @@ def main():
             hits = [[n, old.get(n, 0) + worth] for n in names]
             hits += [[n, c] for n, c in old.items() if n not in names]
             entry["repo_hits"] = hits[:REPOS_MAX * 2]
-            shown = [n for n, c in hits if c >= REPO_SHOWN_AT][:REPOS_MAX]
+            # Most evidence first (ties stay most-recent-first: sorted() is
+            # stable), so the repo the turn really works in leads and one it
+            # only read a couple of files from trails.
+            shown = [n for n, c in sorted(hits, key=lambda h: -h[1])
+                     if c >= REPO_SHOWN_AT][:REPOS_MAX]
             if shown:
                 entry["repos_touched"] = shown
             else:

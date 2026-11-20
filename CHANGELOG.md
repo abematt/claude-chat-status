@@ -12,18 +12,25 @@ Chat Status inside bb, and answering bb from the pop-out.
   repo its latest tool calls touched, with a count of any others
   (`measure-web +2`); hover a gallery card for the full list. A turn with no
   tool calls keeps the previous repos. Clicks still open the folder the chat
-  started in. A repo shows once the chat has edited a file in it or touched
+  started in. With several repos, the one with the most activity leads. A repo shows once the chat has edited a file in it or touched
   it twice in the turn, so a single `ls` of a neighbouring repo does not put
   it on the card.
+- **Claude chats run by bb carry a Claude spark** beside the bb icon. bb runs
+  both agents, so an unmarked card no longer has to mean Claude. Chats in
+  VS Code and terminals stay unmarked.
 - **bb chats use bb's own title.** bb names each thread with its AI service,
   from the whole conversation. A bb card now shows that title instead of the
   on-device summary of one prompt, and shows it even with summaries off. A
   label you set by hand still wins.
-- **bb sidebar plugin** (`bb-plugin-chat-status/`). Each bb thread row shows
-  its project in the project's color, a live turn clock while the agent
-  works, and what it is blocked on while it waits. Other rows show how long
-  ago the chat last ran: green within 15 minutes of finishing, quiet after
-  that, so current work stands apart from the backlog. A *Chats outside bb* item
+- **bb sidebar plugin** (`bb-plugin-chat-status/`). It replaces bb's
+  thread list with *Today*: a card for each thread that ran today, is busy
+  or waiting now, or is pinned. A card shows the project in its color, a
+  live turn clock while the agent works, what it is blocked on while it
+  waits, or how long ago it ran. Cards that need you come first. Older
+  threads fold under *Earlier*, and the list resets overnight. The project
+  named is a short tag per repo (`contributor`, `msr-web`; up to three,
+  then a count), for the repo the thread worked in, read from
+  bb's own record of its tool calls, so it works for every bb thread. A *Chats outside bb* item
   in the sidebar footer lists the chats running in VS Code or a terminal;
   click one to jump to it. Install steps are in the plugin's README.
 - **Cards from bb's own events.** The plugin now listens to bb's thread

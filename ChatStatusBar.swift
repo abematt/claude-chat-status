@@ -523,7 +523,7 @@ enum ProjectStyle {
 
 // Where a chat lives and which agent runs it, as app icons: recognized at a
 // glance where the old text tag ("bb · Codex") had to be read. Claude Code is
-// the default agent and gets no icon; Codex borrows the ChatGPT app's.
+// the default agent and gets no icon outside bb; Codex borrows the ChatGPT app's.
 enum SourceIcon {
     private static var cache: [String: NSImage] = [:]
     private static func bundleIcon(_ ids: [String]) -> NSImage? {
@@ -559,6 +559,11 @@ enum SourceIcon {
         else if chat.host == "terminal" { text.append(chat.hostApp.isEmpty ? "CLI" : chat.hostApp) }
         if chat.agent == "codex" {
             if let a = agent(for: chat) { icons.append(a) } else { text.append("Codex") }
+        }
+        // bb runs both agents, so there a Claude chat is marked too. There is
+        // no Claude app to borrow an icon from: draw its spark.
+        else if !chat.bbThread.isEmpty || chat.hostApp == "bb" {
+            icons.append(Spark.image(frame: 0, color: Palette.clay, side: 32, name: "claude"))
         }
         return (icons, text.joined(separator: " · "))
     }

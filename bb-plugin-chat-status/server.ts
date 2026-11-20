@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { startFeed } from "./feed";
+import { threadRepos } from "./repos";
 
 const chatSchema = z.object({
   sessionId: z.string(),
@@ -48,6 +49,15 @@ export const rpcContract = defineRpcContract({
       /** Lowercased repo name -> palette slot, as the menu bar app assigned. */
       colorSlots: z.record(z.string(), z.number()),
     }),
+  },
+  /** Repos each thread's latest working turn touched, from bb's tool-call history. */
+  thread_repos: {
+    input: z.object({
+      threads: z
+        .array(z.object({ id: z.string().regex(/^thr_[A-Za-z0-9]+$/), path: z.string() }))
+        .max(60),
+    }),
+    output: z.object({ repos: z.record(z.string(), z.array(z.string())) }),
   },
   chats_open: {
     input: z.object({ sessionId: z.string() }),
@@ -183,7 +193,35 @@ export default async function plugin(bb: BbPluginApi) {
     return prefs;
   }
 
+  // A thread's repos change only when it runs, so remember the answer until
+  // bb says the thread moved.
+  const repoCache = new Map<string, string[]>();
+  const threadMoved = ({ thread }: { thread: { id: string } }) => {
+    repoCache.delete(thread.id);
+    bb.realtime.publish(CHATS_CHANGED, {});
+  };
+  bb.events.on("thread.active", threadMoved);
+  bb.events.on("thread.idle", threadMoved);
+
   bb.rpc.register(rpcContract, {
+    thread_repos: async ({ threads }) => {
+      const repos: Record<string, string[]> = {};
+      for (const { id, path } of threads) {
+        let found = repoCache.get(id);
+        if (found === undefined) {
+          try {
+            found = await threadRepos(bb, id, path);
+            repoCache.set(id, found);
+          } catch (error) {
+            // Not cached: the next request tries again.
+            bb.log.warn(`repos for ${id}: ${String(error)}`);
+            found = [];
+          }
+        }
+        repos[id] = found;
+      }
+      return { repos };
+    },
     chats_list: async () => {
       const [chats, { colorSlots, labels }] = await Promise.all([readChats(), readPrefs()]);
       return {

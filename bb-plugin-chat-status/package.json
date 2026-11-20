@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Chat Status",
-    "description": "Shows Chat Status in the sidebar: each thread's project color, turn clock and what it is blocked on, plus the chats running outside bb.",
+    "description": "Turns the sidebar into Today: a card for each thread you ran today with its repo, turn clock and what it is blocked on, plus the chats running outside bb.",
     "branding": {
       "icon": "MessageSquare"
     },

@@ -54,8 +54,9 @@ Idempotent, clone-anywhere. If Codex is installed, its hooks are registered too 
 ## Inside bb
 
 `bb-plugin-chat-status/` is a [bb](https://getbb.app) plugin that shows the
-same status in bb's sidebar: project color, turn clock and blocked-on text on
-each thread row, plus a footer list of the chats running outside bb. See its
+same status in bb's sidebar: a Today list of cards (project color, turn clock,
+blocked-on text) for the threads you ran today, plus a footer list of the
+chats running outside bb. See its
 [README](bb-plugin-chat-status/README.md) to install it.
 
 In the pop-out gallery, a bb card waiting on a permission shows *Deny* and

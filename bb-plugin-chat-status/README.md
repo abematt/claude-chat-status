@@ -5,10 +5,27 @@ reads the status files the hook in this repo writes
 (`~/.claude/chat-status/<session_id>.json`). Its events feed (below) also
 writes them for bb threads.
 
-- **Thread rows** get a metadata item: the project in its color, then the turn
-  clock while the chat works, or what it is blocked on while it waits.
-  Otherwise it shows how long ago the chat last ran, in green for 15 minutes
-  after it finishes and quiet after that.
+- **The thread list becomes "Today".** It replaces bb's list (the
+  `experimental_threadList` slot) with a card for each thread that ran since
+  local midnight, is busy or waiting now, or is pinned. A card shows the
+  title, the project in its color, and the turn clock while the chat works,
+  what it is blocked on while it waits, or how long ago it ran. Cards that
+  need you come first and are tinted. Everything older folds under
+  **Earlier**, which opens by itself when nothing ran today. Nothing is
+  stored, so the list resets overnight. Right-click is bb's own thread menu.
+  To go back to bb's list, pin it under Settings → Appearance → Sidebar.
+- **Repos are short tags.** A card shows one tag per repo the thread worked
+  in, busiest first, up to three and then a count. `shortRepo()` in
+  `app.tsx` drops a `measure-` prefix (`measure-sampler` → `sampler`);
+  `REPO_SHORT` lists the names that rule gets wrong (`measure-contributor-web`
+  → `contributor`, `measure-web` → `msr-web`). Add a line there for a new
+  one. Hover a tag for the full name.
+- **Not carried over from bb's list:** drag-to-reorder, sections, and
+  sub-thread nesting (a sub-thread is its own card).
+- **The project is the repo the thread worked in**, not the folder it was
+  opened on. `repos.ts` reads the thread's tool calls from bb
+  (`threads.events.list`) and applies the hook's rules: an edit, or two
+  touches in a turn, shows a repo, and the busiest repo leads.
 - **Sidebar footer** gets a *Chats outside bb* item listing the chats running
   in VS Code or a terminal. A click routes to the chat the way a card does.
 
@@ -36,8 +53,6 @@ it handled.
 cd bb-plugin-chat-status
 npm install
 bb plugin install . --yes
-bb settings experiment threadRowMetadata true   # row metadata is off by default
-bb thread-list prefs set showRowMetadata true
 ```
 
 ## Develop
