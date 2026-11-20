@@ -17,6 +17,7 @@ import {
   experimental_resolveThreadStatus as resolveThreadStatus,
   experimental_useProviders,
   experimental_useSidebarThreads,
+  useBbNavigate,
   useRealtime,
   useRpc,
   useSidebarThreadDraft,
@@ -24,7 +25,10 @@ import {
   type PluginSidebarThread,
   type PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
-import type { Chat, rpcContract } from "./server";
+import type { Chat, WorklogState, rpcContract } from "./server";
+
+/** Same address server.ts starts the hub on (worklog/hub/server.py). */
+const HUB_URL = "http://127.0.0.1:7377/";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -222,6 +226,201 @@ function threadProjects(
   return folder === undefined ? [] : [folder];
 }
 
+// ---- For me: the private tracker (~/.worklog) ----
+
+/** The tracker's state, refreshed when the store changes and once a minute. */
+function useWorklog(): WorklogState | null {
+  const rpc = useRpc<typeof rpcContract>();
+  const [state, setState] = useState<WorklogState | null>(null);
+  const refetch = useCallback(() => {
+    rpc.call("worklog_state").then(setState, () => undefined);
+  }, [rpc]);
+  useEffect(() => {
+    refetch();
+    const timer = setInterval(refetch, 60_000);
+    return () => clearInterval(timer);
+  }, [refetch]);
+  useRealtime("worklog-changed", refetch);
+  return state;
+}
+
+type Mood = "sleep" | "work" | "brief" | "ask";
+
+/**
+ * The For me robot: a clay pixel square that dozes when nothing is new,
+ * glances around while the collector runs, bounces when a check-in is ready
+ * and waves when it has a question. Motion is CSS only and stops under
+ * prefers-reduced-motion.
+ */
+function Buddy({ mood, size = 34 }: { mood: Mood; size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      aria-hidden="true"
+      className={cn("fm-buddy shrink-0", `fm-${mood}`)}
+      style={{ shapeRendering: "crispEdges" }}
+    >
+      <rect x="6" y="6" width="12" height="12" fill="#D97757" />
+      <rect x="7" y="18" width="3" height="3" fill="#B85F42" />
+      <rect x="14" y="18" width="3" height="3" fill="#B85F42" />
+      <g className="fm-eyes">
+        <rect x="9" y="10" width="2" height="2" fill="#1E1B26" />
+        <rect x="13" y="10" width="2" height="2" fill="#1E1B26" />
+      </g>
+      <rect x="10" y="14" width="4" height="1" fill="#1E1B26" />
+      <rect x="3" y="11" width="3" height="2" fill="#B85F42" />
+      <g className="fm-arm">
+        <rect x="18" y="8" width="2" height="5" fill="#B85F42" />
+        <rect x="18" y="6" width="3" height="2" fill="#B85F42" />
+      </g>
+      <g className="fm-zz" fill="currentColor" opacity="0.6">
+        <rect x="19" y="2" width="3" height="1" />
+        <rect x="20" y="3" width="1" height="1" />
+        <rect x="19" y="4" width="3" height="1" />
+      </g>
+    </svg>
+  );
+}
+
+const BUDDY_CSS = `
+.fm-buddy .fm-arm { transform-origin: 19px 12px; }
+.fm-buddy .fm-zz { opacity: 0; }
+.fm-sleep .fm-zz { opacity: 0.6; }
+@media (prefers-reduced-motion: no-preference) {
+  .fm-ask .fm-arm { animation: fm-wave 0.55s ease-in-out infinite alternate; }
+  .fm-brief { animation: fm-bounce 1.1s ease-in-out infinite; }
+  .fm-sleep .fm-zz { animation: fm-zz 2.6s ease-in-out infinite; }
+  .fm-work .fm-eyes { animation: fm-look 1.4s steps(2) infinite; }
+}
+@keyframes fm-wave { from { transform: rotate(-22deg); } to { transform: rotate(26deg); } }
+@keyframes fm-bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes fm-zz { 0% { opacity: 0; transform: translate(0, 2px); } 50% { opacity: 0.7; } 100% { opacity: 0; transform: translate(2px, -3px); } }
+@keyframes fm-look { 0% { transform: translateX(0); } 100% { transform: translateX(1px); } }
+`;
+
+function nextCheckin(now: Date): string {
+  const day = now.getDay();
+  if (day === 0 || day === 6) return "Weekend · next check-in Monday 9:00";
+  const hour = now.getHours();
+  if (hour < 9) return "Morning check-in at 9:00";
+  if (hour < 13) return "All quiet · midday check-in at 13:00";
+  if (hour < 18) return "All quiet · evening check-in at 18:00";
+  return "All quiet for today";
+}
+
+function forMeStatus(
+  worklog: WorklogState,
+  today: PluginSidebarThread | undefined,
+  todayChat: Chat | undefined,
+  collector: PluginSidebarThread | undefined,
+): { mood: Mood; line: string; badge: number } {
+  const questions = worklog.toConfirm.length + worklog.proposals;
+  if (questions > 0 || (today !== undefined && attentionRank(today, todayChat) === 0)) {
+    return {
+      mood: "ask",
+      line: questions > 0 ? `${questions} question${questions === 1 ? "" : "s"} for you` : "Needs you",
+      badge: questions,
+    };
+  }
+  if (today?.isUnread) {
+    const kind = worklog.latestCheckin?.kind ?? "";
+    const label = kind ? kind[0]!.toUpperCase() + kind.slice(1) : "";
+    return { mood: "brief", line: label ? `${label} check-in ready` : "Check-in ready", badge: 0 };
+  }
+  if (collector !== undefined && collector.status !== "idle") {
+    return { mood: "work", line: "Collecting Slack, meetings, ClickUp…", badge: 0 };
+  }
+  return { mood: "sleep", line: nextCheckin(new Date()), badge: 0 };
+}
+
+/** Pinned at the top of the sidebar: today's For me chat, drawn as the robot. */
+function ForMeCard({
+  worklog,
+  threads,
+  byThread,
+  active,
+  onNavigate,
+}: {
+  worklog: WorklogState;
+  threads: readonly PluginSidebarThread[];
+  byThread: Record<string, Chat>;
+  active: boolean;
+  onNavigate: () => void;
+}) {
+  const nav = useBbNavigate();
+  const today = threads.find((thread) => thread.id === worklog.todayThread);
+  const collector = threads.find((thread) => thread.id === worklog.collectorThread);
+  const { mood, line, badge } = forMeStatus(
+    worklog,
+    today,
+    today ? byThread[today.id] : undefined,
+    collector,
+  );
+  const done = worklog.counts.today_done ?? 0;
+  const total = worklog.counts.today_total ?? 0;
+  const open = () => {
+    if (today) {
+      nav.toThread(today.id);
+      onNavigate();
+    } else {
+      window.open(HUB_URL, "_blank", "noopener");
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1 pt-2">
+      <style>{BUDDY_CSS}</style>
+      <button
+        type="button"
+        onClick={open}
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "relative flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left text-muted-foreground transition-[border-color,box-shadow] hover:bg-accent focus-visible:bg-accent focus-visible:outline-none",
+          active && "bg-accent",
+        )}
+        style={
+          mood === "ask"
+            ? { borderColor: "#D97757", boxShadow: "0 0 0 3px rgb(217 119 87 / 0.18)" }
+            : mood === "brief"
+              ? { borderColor: "currentColor" }
+              : undefined
+        }
+      >
+        <Buddy mood={mood} />
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate text-[13px] font-medium text-foreground">
+            {today ? today.displayTitle : "For me"}
+          </span>
+          <span className="truncate text-xs">{line}</span>
+        </span>
+        {badge > 0 ? (
+          <span
+            className="absolute right-2 top-2 rounded-full px-1.5 text-[11px] font-semibold tabular-nums text-white"
+            style={{ background: "#D97757" }}
+          >
+            {badge}
+          </span>
+        ) : null}
+      </button>
+      <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
+        <span className="tabular-nums">
+          {total > 0 ? `${done}/${total} today` : `${worklog.counts.week ?? 0} this week`}
+          {worklog.mode === "shadow" ? " · shadow" : ""}
+        </span>
+        <a
+          href={HUB_URL}
+          target="_blank"
+          rel="noopener"
+          className="rounded px-1 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
+        >
+          Hub →
+        </a>
+      </div>
+    </div>
+  );
+}
+
 // ---- the Today list ----
 
 /** The current repo in its color, with a count of the others touched. */
@@ -360,12 +559,22 @@ function ThreadGlyph({ thread }: { thread: PluginSidebarThread }) {
     hasUnsubmittedDraft,
     rowStatus,
   });
+  // bb marks a finished, unopened thread with a grey dot, which reads as idle
+  // and clashes with the green age beside it. Draw that dot in the finished
+  // green instead; once the thread is opened it shows the agent's logo.
+  const unreadDone = status.indicator === "unread-success" && status.rowStatus === null;
   return (
     <span
       className="flex size-4 shrink-0 items-center justify-center"
       title={status.label ?? undefined}
     >
-      {status.indicator === "none" && status.rowStatus === null ? (
+      {unreadDone ? (
+        <span
+          className="size-2 rounded-full"
+          style={{ backgroundColor: STATUS_HUE.done }}
+          aria-label={status.label ?? undefined}
+        />
+      ) : status.indicator === "none" && status.rowStatus === null ? (
         <ProviderIcon
           providerKind="agent"
           provider={provider ?? { id: thread.providerId }}
@@ -413,8 +622,12 @@ function TodayCard({
       : rank === 2
         ? { text: "Working", hue: STATUS_HUE.working, numeric: false }
         : null);
-  // Only a card that wants something from you is tinted; the rest stay quiet.
+  // Three tiers, told apart by shape before colour: a card that wants you has a
+  // tinted edge and fill, a card still in flight a plain edge, and a finished
+  // or idle card none (it shows as a box only on hover or when selected). The
+  // border is always 1px, transparent when hidden, so nothing shifts.
   const edge = rank === 0 ? STATUS_HUE.needs_input : rank === 1 ? STATUS_HUE.error : undefined;
+  const inFlight = edge === undefined && rank === 2;
   return (
     <li>
       <ThreadActionsContextMenu thread={actionTarget(thread)}>
@@ -426,17 +639,19 @@ function TodayCard({
             .filter(Boolean)
             .join(" · ")}
           className={cn(
-            "flex min-w-0 flex-col gap-1 rounded-lg border border-border px-2.5 py-2 text-left no-underline",
+            "flex min-w-0 flex-col gap-1 rounded-lg border px-2.5 py-2 text-left no-underline",
+            inFlight ? "border-border" : "border-transparent",
             "hover:bg-accent focus-visible:bg-accent focus-visible:outline-none",
-            active && "bg-accent",
+            // Selected also gets a firmer edge, so it differs from hover.
+            active && "border-foreground/30 bg-accent",
           )}
           style={
-            edge === undefined
-              ? undefined
-              : {
+            edge !== undefined
+              ? {
                   borderColor: `color-mix(in srgb, ${edge} 55%, transparent)`,
                   backgroundImage: `linear-gradient(color-mix(in srgb, ${edge} 9%, transparent), color-mix(in srgb, ${edge} 9%, transparent))`,
                 }
+              : undefined
           }
         >
           <span className="flex min-w-0 items-start gap-2">
@@ -544,6 +759,8 @@ function readEarlierOpen(): boolean {
 function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
   const { rpc, ...state } = useChats();
   const { threads, projects, status } = experimental_useSidebarThreads();
+  const worklog = useWorklog();
+  const forMeThread = worklog?.todayThread ?? "";
   const personalProjectIds = useMemo(
     () => new Set(projects.filter((project) => project.isPersonal).map((project) => project.id)),
     [projects],
@@ -555,7 +772,7 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     const today: PluginSidebarThread[] = [];
     const earlier: PluginSidebarThread[] = [];
     for (const thread of threads) {
-      if (thread.isHidden || thread.isArchived) continue;
+      if (thread.isHidden || thread.isArchived || thread.id === forMeThread) continue;
       (isToday(thread, state.byThread[thread.id], midnight) ? today : earlier).push(thread);
     }
     const recency = (a: PluginSidebarThread, b: PluginSidebarThread) =>
@@ -567,7 +784,7 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     );
     earlier.sort(recency);
     return { today, earlier };
-  }, [threads, state.byThread, midnight]);
+  }, [threads, state.byThread, midnight, forMeThread]);
 
   // Repos only for the cards; `state.chats` changes whenever a thread ran.
   const wanted = today
@@ -608,13 +825,22 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
 
   return (
     <nav aria-label="Threads" className="flex flex-col gap-1 px-2 pb-2">
+      {worklog?.available ? (
+        <ForMeCard
+          worklog={worklog}
+          threads={threads}
+          byThread={state.byThread}
+          active={forMeThread !== "" && forMeThread === activeThreadId}
+          onNavigate={onNavigate}
+        />
+      ) : null}
       <h2 className="px-1 pb-0.5 pt-2 text-xs font-medium text-muted-foreground">Today</h2>
       {today.length === 0 ? (
         <p className="px-1 pb-1 text-xs text-muted-foreground">
           {status === "loading" ? "Loading threads…" : "Nothing started today."}
         </p>
       ) : (
-        <ul className="flex flex-col gap-1.5">
+        <ul className="flex flex-col gap-2">
           {today.map((thread) => (
             <TodayCard
               key={thread.id}
@@ -633,7 +859,7 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
             onClick={toggleEarlier}
             aria-expanded={showEarlier}
             disabled={today.length === 0}
-            className="mt-2 flex items-center gap-1 rounded-md px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none disabled:hover:text-muted-foreground"
+            className="mt-3 flex items-center gap-1 rounded-md px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none disabled:hover:text-muted-foreground"
           >
             <Icon
               name="ChevronRight"
@@ -697,6 +923,9 @@ function OtherChatRow({
         onClick={onOpen}
         className="flex w-full min-w-0 flex-col gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
       >
+        <span className="truncate text-sm text-foreground">
+          {chat.title || "Untitled chat"}
+        </span>
         <span className="flex min-w-0 items-center gap-1.5 text-xs">
           <ProjectName
             repo={repo}
@@ -718,9 +947,6 @@ function OtherChatRow({
           >
             {text}
           </span>
-        </span>
-        <span className="truncate text-sm text-foreground">
-          {chat.title || "Untitled chat"}
         </span>
       </button>
     </li>
@@ -770,6 +996,7 @@ function OtherChats() {
 }
 
 export default definePluginApp((app) => {
+
   app.slots.experimental_threadList({
     id: "today",
     title: "Today",
