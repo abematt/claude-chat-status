@@ -96,6 +96,25 @@ struct Chat {
     var projectLabel: String {
         projects.count > 1 ? "\(project) +\(projects.count - 1)" : project
     }
+    // The same label with the repo's short name ("msr-web +2"), for the
+    // pop-out's small tiles. The rule and table are a copy of `shortRepo` /
+    // `REPO_SHORT` in bb-plugin-chat-status/app.tsx: keep them in step.
+    static let repoShort: [String: String] = [
+        "measure-contributor-web": "contributor",
+        "measure-web": "msr-web",
+        "measure-predict-api": "predict-api",
+        "measure-audience-tools": "assembly",
+        "claude-chat-status": "chat-status",
+    ]
+    static func shortRepo(_ repo: String) -> String {
+        let key = repo.lowercased()
+        if let name = repoShort[key] { return name }
+        return key.hasPrefix("measure-") ? String(repo.dropFirst("measure-".count)) : repo
+    }
+    var shortProjectLabel: String {
+        let name = Chat.shortRepo(project)
+        return projects.count > 1 ? "\(name) +\(projects.count - 1)" : name
+    }
 
     // Small tag after the repo: where the chat lives, and which agent when
     // it isn't Claude Code. Both change what a click can do.
@@ -1143,7 +1162,7 @@ final class GalleryTileView: NSView {
         var nameW: CGFloat = 0
         for size in stride(from: CGFloat(10), through: 8, by: -0.5) {
             pillFont = .systemFont(ofSize: size, weight: .semibold)
-            nameW = ceil((chat.projectLabel as NSString).size(withAttributes: [.font: pillFont]).width) + 4
+            nameW = ceil((chat.shortProjectLabel as NSString).size(withAttributes: [.font: pillFont]).width) + 4
             if nameW + 6 <= W - 10 { break }
         }
         let pillW = min(W - 10, nameW + 6)
@@ -1152,7 +1171,7 @@ final class GalleryTileView: NSView {
         pill.layer?.cornerRadius = 5
         pill.layer?.backgroundColor = ProjectStyle.fill(for: chat.project, theme: theme).cgColor
         addSubview(pill)
-        let repo = NSTextField(labelWithString: chat.projectLabel)
+        let repo = NSTextField(labelWithString: chat.shortProjectLabel)
         repo.font = pillFont
         repo.textColor = ProjectStyle.text(for: chat.project, theme: theme)
         repo.lineBreakMode = .byTruncatingMiddle
@@ -2504,7 +2523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             content.title = headline
             content.subtitle = subtitle
             content.body = body
-            content.sound = .default
+            // Silent on purpose: several chats finishing made a run of pings.
             content.userInfo = ["cwd": chat.cwd, "sessionId": chat.sessionId,
                                 "host": chat.host, "hostPid": chat.hostPid,
                                 "bbThread": chat.bbThread, "agent": chat.agent]
@@ -2520,7 +2539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 .replacingOccurrences(of: "\"", with: "\\\"")
                 .replacingOccurrences(of: "\n", with: " ")
         }
-        let script = "display notification \"\(esc(body))\" with title \"\(esc(headline))\" subtitle \"\(esc(subtitle))\" sound name \"Ping\""
+        let script = "display notification \"\(esc(body))\" with title \"\(esc(headline))\" subtitle \"\(esc(subtitle))\""
         run("/usr/bin/osascript", ["-e", script])
     }
 
@@ -2541,7 +2560,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        completionHandler([.banner])
     }
 }
 
