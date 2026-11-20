@@ -51,6 +51,17 @@ Idempotent, clone-anywhere. If Codex is installed, its hooks are registered too 
 > [!NOTE]
 > **AI summaries** (macOS 26+ with Apple Intelligence): card names become ~6-word on-device summaries of the chat's latest prompt — local, private, ~0.5s. Toggle in the panel's Options. Without the model, cards show the raw prompt.
 
+## Inside bb
+
+`bb-plugin-chat-status/` is a [bb](https://getbb.app) plugin that shows the
+same status in bb's sidebar: a Today list of cards (project color, turn clock,
+blocked-on text) for the threads you ran today, plus a footer list of the
+chats running outside bb. See its
+[README](bb-plugin-chat-status/README.md) to install it.
+
+In the pop-out gallery, a bb card waiting on a permission shows *Deny* and
+*Allow* on hover, so you can answer it without switching to bb.
+
 ## How it works
 
 ```mermaid

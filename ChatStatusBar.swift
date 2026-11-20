@@ -21,6 +21,48 @@ func run(_ path: String, _ args: [String]) {
     try? p.run()
 }
 
+// Runs to completion and hands back the exit status and stdout. Blocks, so
+// call it off the main thread.
+func runCapturing(_ path: String, _ args: [String]) -> (status: Int32, out: Data) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return (-1, Data()) }
+    let out = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, out)
+}
+
+// Answers a bb thread's pending approval through bb's own CLI, so a
+// permission prompt can be settled from the gallery without switching to bb.
+// False when there was nothing to answer or bb refused (a question or a form
+// is not an approval); the caller then opens the thread instead.
+enum BBInteraction {
+    static let cli = NSHomeDirectory() + "/.bb/bin/bb"
+
+    static func answer(thread: String, allow: Bool) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: cli) else { return false }
+        let listed = runCapturing(cli, ["thread", "interactions", "list", thread, "--json"])
+        guard listed.status == 0,
+              let rows = try? JSONSerialization.jsonObject(with: listed.out) as? [[String: Any]],
+              let id = rows.last(where: { ($0["status"] as? String) == "pending" })?["id"] as? String
+        else { return false }
+        if !allow {
+            return runCapturing(cli, ["thread", "interactions", "deny", id, thread]).status == 0
+        }
+        if runCapturing(cli, ["thread", "interactions", "approve", id, thread]).status == 0 {
+            return true
+        }
+        // A permission request is granted rather than approved; keep it to
+        // this turn, the narrower of bb's two scopes.
+        return runCapturing(cli, ["thread", "interactions", "grant", id, thread,
+                                  "--scope", "turn"]).status == 0
+    }
+}
+
 struct Chat {
     let sessionId: String
     let repo: String
@@ -42,6 +84,18 @@ struct Chat {
     let hostPid: Int          // terminal app PID, for focus-by-process on click
     let bbThread: String      // bb thread id when the chat runs inside bb ("" otherwise)
     let agent: String         // "codex" for Codex chats; "" means Claude Code
+    let reposTouched: [String] // repos its latest tool calls worked in, most recent first
+    let bbTitle: String       // the title bb gave the thread ("" outside bb or before bb names it)
+
+    // What the card names as the chat's project. A chat opened on a workspace
+    // folder of many repos is pinned to that folder (`repo`, which click
+    // routing needs); the repos it actually works in say more, so they win.
+    var projects: [String] { reposTouched.isEmpty ? [repo] : reposTouched }
+    var project: String { projects[0] }
+    // "measure-web +2": the current repo, and how many others this turn.
+    var projectLabel: String {
+        projects.count > 1 ? "\(project) +\(projects.count - 1)" : project
+    }
 
     // Small tag after the repo: where the chat lives, and which agent when
     // it isn't Claude Code. Both change what a click can do.
@@ -203,7 +257,10 @@ func loadChats() -> [Chat] {
             hostApp: (obj["host_app"] as? String) ?? "",
             hostPid: (obj["host_pid"] as? Int) ?? 0,
             bbThread: (obj["bb_thread"] as? String) ?? "",
-            agent: (obj["agent"] as? String) ?? ""
+            agent: (obj["agent"] as? String) ?? "",
+            reposTouched: ((obj["repos_touched"] as? [Any]) ?? [])
+                .compactMap { $0 as? String }.filter { !$0.isEmpty },
+            bbTitle: (obj["bb_title"] as? String) ?? ""
         ))
     }
     let order = ["needs_input": 0, "error": 1, "working": 2, "live": 3, "done": 4]
@@ -213,7 +270,7 @@ func loadChats() -> [Chat] {
         if a != b { return a < b }
         return $0.updatedAt > $1.updatedAt
     }
-    ProjectStyle.sync(repos: chats.map { $0.repo })
+    ProjectStyle.sync(repos: chats.map { $0.project })
     return chats
 }
 
@@ -466,7 +523,7 @@ enum ProjectStyle {
 
 // Where a chat lives and which agent runs it, as app icons: recognized at a
 // glance where the old text tag ("bb · Codex") had to be read. Claude Code is
-// the default agent and gets no icon; Codex borrows the ChatGPT app's.
+// the default agent and gets no icon outside bb; Codex borrows the ChatGPT app's.
 enum SourceIcon {
     private static var cache: [String: NSImage] = [:]
     private static func bundleIcon(_ ids: [String]) -> NSImage? {
@@ -502,6 +559,11 @@ enum SourceIcon {
         else if chat.host == "terminal" { text.append(chat.hostApp.isEmpty ? "CLI" : chat.hostApp) }
         if chat.agent == "codex" {
             if let a = agent(for: chat) { icons.append(a) } else { text.append("Codex") }
+        }
+        // bb runs both agents, so there a Claude chat is marked too. There is
+        // no Claude app to borrow an icon from: draw its spark.
+        else if !chat.bbThread.isEmpty || chat.hostApp == "bb" {
+            icons.append(Spark.image(frame: 0, color: Palette.clay, side: 32, name: "claude"))
         }
         return (icons, text.joined(separator: " · "))
     }
@@ -713,11 +775,13 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
         // The repo carries its project color: the fastest way to tell rows apart.
         let repoAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: ProjectStyle.text(for: chat.repo, theme: theme),
+            .foregroundColor: ProjectStyle.text(for: chat.project, theme: theme),
             .paragraphStyle: para,
         ]
-        let repoText = NSMutableAttributedString(string: chat.repo, attributes: repoAttrs)
-        if !chat.branch.isEmpty {
+        let repoText = NSMutableAttributedString(string: chat.projectLabel, attributes: repoAttrs)
+        // The branch is the pinned folder's; beside another repo's name it
+        // would read as that repo's branch.
+        if !chat.branch.isEmpty, chat.project == chat.repo {
             repoText.append(NSAttributedString(string: "  ·  \(chat.branch)", attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .regular),
                 .foregroundColor: theme.textMuted,
@@ -956,12 +1020,19 @@ final class ChatCardView: NSView, NSTextFieldDelegate {
 // Inside: status glyph (the same animated spark as the rows) + meta / turn clock,
 // the chat title, repo (+ host). Hover swaps the meta for a remove ✕; rename /
 // reorder stay in the dropdown. A click routes to the chat exactly like a row.
+// A bb chat waiting on a permission also gets Deny / Allow at its foot on
+// hover, which answer the prompt through bb without leaving the current app.
 final class GalleryTileView: NSView {
     static let size = NSSize(width: 106, height: 106)
     static let sparkSide: CGFloat = 16
     static let radius: CGFloat = 9
     var onClick: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onAnswer: ((Bool) -> Void)?   // true = allow; set only on answerable tiles
+    private let answerable: Bool
+    private var denyButton: NSView?
+    private var allowButton: NSView?
+    private var footViews: [NSView] = []   // source icons, hidden while the buttons show
     private let theme: Theme
     private let meta = NSTextField(labelWithString: "")
     // An image, not a button: the tile claims every hit, so mouseUp tests this
@@ -973,6 +1044,8 @@ final class GalleryTileView: NSView {
 
     init(chat: Chat, title: String, theme: Theme) {
         self.theme = theme
+        answerable = !chat.bbThread.isEmpty && chat.status == "needs_input"
+            && chat.waitingKind == "permission"
         super.init(frame: NSRect(origin: .zero, size: Self.size))
         let W = Self.size.width, H = Self.size.height
         wantsLayer = true
@@ -1070,18 +1143,18 @@ final class GalleryTileView: NSView {
         var nameW: CGFloat = 0
         for size in stride(from: CGFloat(10), through: 8, by: -0.5) {
             pillFont = .systemFont(ofSize: size, weight: .semibold)
-            nameW = ceil((chat.repo as NSString).size(withAttributes: [.font: pillFont]).width) + 4
+            nameW = ceil((chat.projectLabel as NSString).size(withAttributes: [.font: pillFont]).width) + 4
             if nameW + 6 <= W - 10 { break }
         }
         let pillW = min(W - 10, nameW + 6)
         let pill = NSView(frame: NSRect(x: 5, y: gy - 3 - 16, width: pillW, height: 16))
         pill.wantsLayer = true
         pill.layer?.cornerRadius = 5
-        pill.layer?.backgroundColor = ProjectStyle.fill(for: chat.repo, theme: theme).cgColor
+        pill.layer?.backgroundColor = ProjectStyle.fill(for: chat.project, theme: theme).cgColor
         addSubview(pill)
-        let repo = NSTextField(labelWithString: chat.repo)
+        let repo = NSTextField(labelWithString: chat.projectLabel)
         repo.font = pillFont
-        repo.textColor = ProjectStyle.text(for: chat.repo, theme: theme)
+        repo.textColor = ProjectStyle.text(for: chat.project, theme: theme)
         repo.lineBreakMode = .byTruncatingMiddle
         repo.frame = NSRect(x: 3, y: (16 - ceil(pillFont.pointSize + 3)) / 2, width: pillW - 6,
                             height: ceil(pillFont.pointSize + 3))
@@ -1097,6 +1170,7 @@ final class GalleryTileView: NSView {
             iv.image = icon
             iv.imageScaling = .scaleProportionallyUpOrDown
             addSubview(iv)
+            footViews.append(iv)
             ix -= 3
         }
         if !marks.text.isEmpty {
@@ -1107,6 +1181,15 @@ final class GalleryTileView: NSView {
             src.lineBreakMode = .byTruncatingTail
             src.frame = NSRect(x: 8, y: 7, width: ix - 8, height: 12)
             addSubview(src)
+            footViews.append(src)
+        }
+
+        if answerable {
+            let bw = (W - 10 - 4) / 2
+            denyButton = footButton("Deny", x: 5, width: bw, fill: theme.hoverWash,
+                                    text: theme.textPrimary)
+            allowButton = footButton("Allow", x: 5 + bw + 4, width: bw, fill: Palette.needs,
+                                     text: Palette.hex(0x1D1D1F))
         }
 
         let t = NSTextField(wrappingLabelWithString: title)
@@ -1123,6 +1206,33 @@ final class GalleryTileView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    // A drawn pill, not an NSButton: the tile claims every hit, so mouseUp
+    // tests these rects itself (like the ✕).
+    private func footButton(_ title: String, x: CGFloat, width: CGFloat,
+                            fill: NSColor, text: NSColor) -> NSView {
+        let b = NSView(frame: NSRect(x: x, y: 4, width: width, height: 16))
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 5
+        b.layer?.backgroundColor = fill.cgColor
+        let l = NSTextField(labelWithString: title)
+        l.font = .systemFont(ofSize: 10, weight: .semibold)
+        l.textColor = text
+        l.alignment = .center
+        l.frame = NSRect(x: 0, y: 1, width: width, height: 13)
+        b.addSubview(l)
+        b.setAccessibilityLabel(title)
+        b.isHidden = true
+        addSubview(b)
+        return b
+    }
+
+    private func showButtons(_ show: Bool) {
+        guard answerable else { return }
+        denyButton?.isHidden = !show
+        allowButton?.isHidden = !show
+        footViews.forEach { $0.isHidden = show }
+    }
 
     static func shortMeta(for chat: Chat) -> String {
         switch chat.status {
@@ -1161,11 +1271,13 @@ final class GalleryTileView: NSView {
         layer?.backgroundColor = theme.tileHover.cgColor
         meta.isHidden = true
         closeIcon.isHidden = false
+        showButtons(true)
     }
     override func mouseExited(with event: NSEvent) {
         layer?.backgroundColor = theme.tileBg.cgColor
         meta.isHidden = false
         closeIcon.isHidden = true
+        showButtons(false)
     }
     override func mouseDown(with event: NSEvent) {}
     override func mouseUp(with event: NSEvent) {
@@ -1175,9 +1287,26 @@ final class GalleryTileView: NSView {
         // to the chat instead.
         if !closeIcon.isHidden, closeIcon.frame.insetBy(dx: -5, dy: -5).contains(p) {
             onDelete?()
+        } else if let allow = allowButton, !allow.isHidden, allow.frame.contains(p) {
+            sent("allowing…")
+            onAnswer?(true)
+        } else if let deny = denyButton, !deny.isHidden, deny.frame.contains(p) {
+            sent("denying…")
+            onAnswer?(false)
         } else {
             onClick?()
         }
+    }
+
+    // One answer per prompt: the buttons go and the meta says what was sent,
+    // until the chat's next status rebuilds the tile.
+    private func sent(_ text: String) {
+        denyButton?.removeFromSuperview(); denyButton = nil
+        allowButton?.removeFromSuperview(); allowButton = nil
+        footViews.forEach { $0.isHidden = false }
+        closeIcon.isHidden = true
+        meta.stringValue = text
+        meta.isHidden = false
     }
 
     func animTick(_ frame: Int) {
@@ -1318,11 +1447,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 x: pad + CGFloat(c) * (ts.width + gap),
                 y: H - headerH - CGFloat(r + 1) * ts.height - CGFloat(r) * gap))
             let detail = ChatCardView.detail(for: chat).0
-            tile.toolTip = detail.isEmpty ? chat.cwd : "\(detail)\n\(chat.cwd)"
+            // The pill has room for one repo; the rest are listed here.
+            let where_ = chat.projects.count > 1
+                ? "\(chat.projects.joined(separator: ", "))\n\(chat.cwd)" : chat.cwd
+            tile.toolTip = detail.isEmpty ? where_ : "\(detail)\n\(where_)"
             tile.onClick = { [weak self] in
                 self?.routeTo(cwd: chat.cwd, sessionId: chat.sessionId,
                               host: chat.host, hostPid: chat.hostPid,
                               bbThread: chat.bbThread, agent: chat.agent)
+            }
+            // Settle the prompt through bb in the background; if bb has
+            // nothing to approve (it was a question, or already answered),
+            // fall back to showing the thread.
+            tile.onAnswer = { [weak self] allow in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let ok = BBInteraction.answer(thread: chat.bbThread, allow: allow)
+                    DispatchQueue.main.async {
+                        if ok { self?.poll() } else { tile.onClick?() }
+                    }
+                }
             }
             // Same as the row's ✕: drops the status file. The session itself
             // is untouched, so its next hook event brings the tile back.
@@ -1493,7 +1636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // Kick off a summary for a chat if enabled, available, and its prompt changed.
     func ensureSummary(for chat: Chat) {
-        guard summariesEnabled, summariesAvailable else { return }
+        guard summariesEnabled, summariesAvailable, chat.bbTitle.isEmpty else { return }
         // Must precede the in-flight insert: bailing after it would strand the
         // key in summaryInFlight and block that session's summaries forever.
         guard #available(macOS 26.0, *) else { return }
@@ -1524,6 +1667,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // The best label to show for a chat: its AI summary if ready, else nil
     // (raw). A cached "" means the model failed this prompt — show raw text.
     func summaryText(for chat: Chat) -> String? {
+        // A bb thread already has a title written by bb's own AI service, from
+        // the whole conversation; it beats an on-device summary of one prompt
+        // and shows even with summaries switched off.
+        if !chat.bbTitle.isEmpty { return chat.bbTitle }
         guard summariesEnabled else { return nil }
         guard let t = summaryCache[chat.sessionId]?.text, !t.isEmpty else { return nil }
         return t
@@ -1665,7 +1812,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         chats.map {
             "\($0.sessionId)|\($0.status)|\(age($0.activityDate))|\($0.title)|" +
             "\($0.waitingOn)|\($0.waitingKind)|\($0.errorType)|\($0.failStreak)|" +
-            "\($0.background)|\($0.lastMessage)"
+            "\($0.background)|\($0.lastMessage)|\($0.projects.joined(separator: ","))|\($0.bbTitle)"
         }.joined(separator: "\n")
     }
 
@@ -2351,7 +2498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // the banner without opening the chat.
         if chat.status == "done", !chat.lastMessage.isEmpty { body = chat.lastMessage }
         // The user's label is the chat's chosen identity — use it in pings too.
-        let subtitle = labels[chat.sessionId] ?? chat.repo
+        let subtitle = labels[chat.sessionId] ?? chat.projectLabel
         if nativeNotifications {
             let content = UNMutableNotificationContent()
             content.title = headline
@@ -2401,7 +2548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 if CommandLine.arguments.contains("--dump") {
     let labels = (UserDefaults.standard.dictionary(forKey: "labels") as? [String: String]) ?? [:]
     for c in loadChats() {
-        var line = "\(label(for: c))\t\(labels[c.sessionId] ?? c.repo)\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
+        var line = "\(label(for: c))\t\(labels[c.sessionId] ?? c.projects.joined(separator: ","))\t\(c.branch)\t\(age(c.activityDate))\t\(c.title)"
         if !c.waitingOn.isEmpty { line += "\t[waiting: \(c.waitingOn)]" }
         if c.status == "error" { line += "\t[\(errorText(c.errorType))]" }
         if c.failStreak >= 3 { line += "\t[\(c.failStreak) tool failures]" }
