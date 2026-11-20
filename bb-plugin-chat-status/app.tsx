@@ -63,7 +63,8 @@ function projectHue(repo: string, slots: Record<string, number>): string {
 
 /**
  * The names the team says out loud (and the docker service names), where
- * dropping the "measure-" prefix is not enough. Keys are lowercase.
+ * dropping the "measure-" prefix is not enough. Keys are lowercase. The
+ * menu bar app has a copy (`Chat.repoShort` in ChatStatusBar.swift).
  */
 const REPO_SHORT: Record<string, string> = {
   "measure-contributor-web": "contributor",

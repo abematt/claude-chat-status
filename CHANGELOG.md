@@ -15,6 +15,9 @@ Chat Status inside bb, and answering bb from the pop-out.
   started in. With several repos, the one with the most activity leads. A repo shows once the chat has edited a file in it or touched
   it twice in the turn, so a single `ls` of a neighbouring repo does not put
   it on the card.
+- **Pop-out tiles use short repo names** (`contributor`, `msr-web`), the
+  same ones as the bb sidebar. The dropdown rows keep full names.
+- **Notifications are silent.** The banner still appears; the ping is gone.
 - **Claude chats run by bb carry a Claude spark** beside the bb icon. bb runs
   both agents, so an unmarked card no longer has to mean Claude. Chats in
   VS Code and terminals stay unmarked.
