@@ -617,16 +617,26 @@ function ForMeCard({
   worklog,
   threads,
   byThread,
+  worklogProjectId,
   active,
   onNavigate,
 }: {
   worklog: WorklogState;
   threads: readonly PluginSidebarThread[];
   byThread: Record<string, Chat>;
+  /** The bb project the tracker's chats run in; any new chat there is the assistant. */
+  worklogProjectId: string | null;
   active: boolean;
   onNavigate: () => void;
 }) {
   const nav = useBbNavigate();
+  // Ask: always a fresh chat in the Worklog project, whatever the day. The
+  // folder's CLAUDE.md makes it the assistant; the check-in thread is untouched.
+  const ask = () => {
+    if (!worklogProjectId) return;
+    nav.toCompose({ projectId: worklogProjectId, focusPrompt: true });
+    onNavigate();
+  };
   const today = threads.find((thread) => thread.id === worklog.todayThread);
   const collector = threads.find(
     (thread) => thread.id === worklog.collectorThread,
@@ -687,27 +697,31 @@ function ForMeCard({
           </span>
         ) : null}
       </button>
-      <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
-        <span className="tabular-nums">
-          {total > 0
-            ? `${done}/${total} today`
-            : `${worklog.counts.week ?? 0} this week`}
-          {worklog.mode === "shadow" ? " · shadow" : ""}
-        </span>
+      <div className="flex items-center gap-1.5">
+        {worklogProjectId ? (
+          <button type="button" onClick={ask} className={FM_BUTTON}>
+            <Icon name="MessageSquarePlus" className="size-3.5" />
+            Ask
+          </button>
+        ) : null}
         {worklog.hubUrl ? (
-          <a
-            href={worklog.hubUrl}
-            target="_blank"
-            rel="noopener"
-            className="rounded px-1 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
-          >
-            Hub →
+          <a href={worklog.hubUrl} target="_blank" rel="noopener" className={FM_BUTTON}>
+            <Icon name="ListTodo" className="size-3.5" />
+            Hub
           </a>
         ) : null}
+      </div>
+      <div className="px-1 text-[11px] tabular-nums text-muted-foreground">
+        {total > 0 ? `${done}/${total} today` : `${worklog.counts.week ?? 0} this week`}
+        {worklog.mode === "shadow" ? " · shadow mode" : ""}
       </div>
     </div>
   );
 }
+
+/** Ask / Hub under the card: real buttons, with a raised edge and a press. */
+const FM_BUTTON =
+  "inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm transition-[background-color,transform,box-shadow] duration-100 hover:bg-accent active:translate-y-px active:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 // ---- the Today list ----
 
@@ -1075,6 +1089,12 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
   const { threads, projects, status } = experimental_useSidebarThreads();
   const worklog = useWorklog();
   const forMeThread = worklog?.todayThread ?? "";
+  // The tracker's chats (Ask, check-ins, collector) live in the "Worklog" project
+  // and are reached from the For me card, so the list leaves them out.
+  const worklogProjectId = useMemo(
+    () => projects.find((project) => project.name === "Worklog")?.id ?? null,
+    [projects],
+  );
   const personalProjectIds = useMemo(
     () =>
       new Set(
@@ -1091,7 +1111,12 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     const today: PluginSidebarThread[] = [];
     const earlier: PluginSidebarThread[] = [];
     for (const thread of threads) {
-      if (thread.isHidden || thread.isArchived || thread.id === forMeThread)
+      if (
+        thread.isHidden ||
+        thread.isArchived ||
+        thread.id === forMeThread ||
+        (worklogProjectId !== null && thread.projectId === worklogProjectId)
+      )
         continue;
       (isToday(thread, state.byThread[thread.id], midnight)
         ? today
@@ -1107,7 +1132,7 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     );
     earlier.sort(recency);
     return { today, earlier };
-  }, [threads, state.byThread, midnight, forMeThread]);
+  }, [threads, state.byThread, midnight, forMeThread, worklogProjectId]);
 
   // Repos only for the cards; `state.chats` changes whenever a thread ran.
   const wanted = today
@@ -1158,6 +1183,7 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
           worklog={worklog}
           threads={threads}
           byThread={state.byThread}
+          worklogProjectId={worklogProjectId}
           active={forMeThread !== "" && forMeThread === activeThreadId}
           onNavigate={onNavigate}
         />

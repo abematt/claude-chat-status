@@ -318,6 +318,40 @@ def question_text(payload):
     return " ".join(str(q or "").split())
 
 
+LEDGER = "_ledger.jsonl"
+LEDGER_MAX_BYTES = 5 * 1024 * 1024
+
+
+def append_ledger(entry):
+    """One line per finished turn, kept after the status file is gone.
+
+    Status files vanish on SessionEnd, so this is the only record of what a
+    chat worked on. Readers (the worklog collector) take it from here. The
+    app and the bb plugin read only *.json, so this file is invisible to them.
+    """
+    path = os.path.join(STATUS_DIR, LEDGER)
+    try:
+        if os.path.getsize(path) > LEDGER_MAX_BYTES:
+            os.replace(path, os.path.join(STATUS_DIR, "_ledger.1.jsonl"))
+    except OSError:
+        pass
+    line = {
+        "ts": entry.get("updated_at"),
+        "session_id": entry.get("session_id"),
+        "agent": entry.get("agent") or "claude",
+        "host": entry.get("host") or "",
+        "bb_thread": entry.get("bb_thread") or "",
+        "title": entry.get("bb_title") or entry.get("title") or "",
+        "last_prompt": entry.get("last_prompt") or "",
+        "last_message": entry.get("last_message") or "",
+        "repo": entry.get("repo") or "",
+        "repos_touched": entry.get("repos_touched") or [],
+        "cwd": entry.get("cwd") or "",
+    }
+    with open(path, "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+
 def main():
     status = sys.argv[1] if len(sys.argv) > 1 else "live"
     agent = "codex" if len(sys.argv) > 2 and sys.argv[2] == "codex" else "claude"
@@ -573,6 +607,13 @@ def main():
     with open(tmp, "w") as f:
         json.dump(entry, f)
     os.replace(tmp, path)
+
+    # A true finish (not one still running background work) goes in the ledger.
+    if status == "done":
+        try:
+            append_ledger(entry)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
