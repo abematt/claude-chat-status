@@ -63,10 +63,45 @@ export const rpcContract = defineRpcContract({
     input: z.object({ sessionId: z.string() }),
     output: z.object({ opened: z.boolean() }),
   },
+  /** The private tracker, read only through the `worklog` CLI, for the For me card. */
+  worklog_state: {
+    input: z.null(),
+    output: worklogStateSchema(),
+  },
 });
+
+function worklogStateSchema() {
+  const item = z.object({
+    id: z.number(),
+    title: z.string(),
+    status: z.string(),
+    project: z.string(),
+    stream: z.string(),
+    why: z.string(),
+  });
+  return z.object({
+    available: z.boolean(),
+    mode: z.string(),
+    counts: z.record(z.string(), z.number()),
+    today: z.array(item),
+    week: z.array(item),
+    dontForget: z.array(item),
+    toConfirm: z.array(item),
+    proposals: z.number(),
+    latestCheckin: z.object({ kind: z.string(), text: z.string(), at: z.string() }).nullable(),
+    /** Today's For me thread, when the morning check-in has made one. */
+    todayThread: z.string(),
+    collectorThread: z.string(),
+    /** The hub web page, kept running by `worklog hub ensure`. */
+    hubUrl: z.string(),
+  });
+}
+export type WorklogState = z.infer<ReturnType<typeof worklogStateSchema>>;
 
 /** Realtime channel app.tsx listens on; published when a status file changes. */
 const CHATS_CHANGED = "chats-changed";
+/** Published when the tracker changes (a tick in the hub, or the store file moved). */
+const WORKLOG_CHANGED = "worklog-changed";
 const PREFS_DOMAIN = "com.measure.chatstatus";
 const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -74,9 +109,9 @@ function statusDir(): string {
   return process.env.CHAT_STATUS_DIR || join(homedir(), ".claude", "chat-status");
 }
 
-function run(command: string, args: string[]): Promise<string> {
+function run(command: string, args: string[], timeout = 5000): Promise<string> {
   return new Promise((resolve) => {
-    execFile(command, args, { timeout: 5000 }, (error, stdout) => {
+    execFile(command, args, { timeout, maxBuffer: 8 * 1024 * 1024 }, (error, stdout) => {
       resolve(error ? "" : stdout);
     });
   });
@@ -167,6 +202,67 @@ async function readPrefsDictionary(key: string): Promise<Record<string, unknown>
   }
 }
 
+// ---- the private tracker ----
+//
+// The `worklog` CLI is the whole contract: this file runs `worklog board --json`
+// and `worklog hub ensure` and never touches the tracker's files or folders.
+
+const WORKLOG_CLI = join(homedir(), ".local", "bin", "worklog");
+
+async function worklogJson(args: string[]): Promise<unknown> {
+  const out = await run(WORKLOG_CLI, args, 10_000);
+  try {
+    return JSON.parse(out);
+  } catch {
+    return null;
+  }
+}
+
+/** Start the hub page if it isn't serving; returns its address, or "" with no tracker. */
+async function ensureHub(): Promise<string> {
+  const out = (await worklogJson(["hub", "ensure"])) as Record<string, unknown> | null;
+  return out !== null && out.running === true ? str(out.url) : "";
+}
+
+function toItem(raw: unknown) {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: num(r.id),
+    title: str(r.title),
+    status: str(r.status),
+    project: str(r.project),
+    stream: str(r.stream),
+    why: str(r.why) || (r.carried_over === true ? "carried over" : ""),
+  };
+}
+
+async function readWorklog(): Promise<WorklogState> {
+  const [board, hubUrl] = await Promise.all([worklogJson(["board", "--json"]), ensureHub()]);
+  const b = (board ?? {}) as Record<string, unknown>;
+  const list = (key: string) => (Array.isArray(b[key]) ? (b[key] as unknown[]).map(toItem) : []);
+  const counts: Record<string, number> = {};
+  for (const [key, value] of Object.entries((b.counts ?? {}) as Record<string, unknown>)) {
+    if (typeof value === "number") counts[key] = value;
+  }
+  const checkin = b.latest_checkin as Record<string, unknown> | null | undefined;
+  return {
+    available: board !== null,
+    mode: str(b.mode) || "live",
+    counts,
+    today: list("today"),
+    week: list("week"),
+    dontForget: list("dont_forget").slice(0, 8),
+    toConfirm: list("to_confirm"),
+    proposals: counts.proposals ?? 0,
+    latestCheckin: checkin
+      ? { kind: str(checkin.kind), text: str(checkin.text), at: str(checkin.created_at) }
+      : null,
+    todayThread: str(b.today_thread),
+    collectorThread: str(b.collector_thread),
+    hubUrl,
+  };
+}
+
 export default async function plugin(bb: BbPluginApi) {
   // Preferences change rarely (a new repo, a rename); read them at most every
   // ten seconds rather than on each status-file write.
@@ -199,11 +295,13 @@ export default async function plugin(bb: BbPluginApi) {
   const threadMoved = ({ thread }: { thread: { id: string } }) => {
     repoCache.delete(thread.id);
     bb.realtime.publish(CHATS_CHANGED, {});
+    bb.realtime.publish(WORKLOG_CHANGED, {});
   };
   bb.events.on("thread.active", threadMoved);
   bb.events.on("thread.idle", threadMoved);
 
   bb.rpc.register(rpcContract, {
+    worklog_state: async () => readWorklog(),
     thread_repos: async ({ threads }) => {
       const repos: Record<string, string[]> = {};
       for (const { id, path } of threads) {
@@ -284,6 +382,8 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.warn(`not watching ${statusDir()}: ${String(error)}`);
   }
 
+  // The tracker has no change feed of its own, so the UI polls worklog_state
+  // (once a minute, and whenever a bb thread moves, below).
   // Cards for bb threads from bb's own events (feed.ts). On by default;
   // `bb plugin config chat-status set feed false` turns it off.
   const settings = bb.settings.define({
@@ -295,8 +395,11 @@ export default async function plugin(bb: BbPluginApi) {
   });
   if ((await settings.get()).feed) startFeed(bb, statusDir);
 
+  void ensureHub();
+
   bb.onDispose(() => {
     watcher?.close();
     if (pending !== null) clearTimeout(pending);
+
   });
 }

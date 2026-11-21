@@ -7,7 +7,7 @@
 //     with everything older folded away under "Earlier";
 //   - a footer item that lists the chats running outside bb (VS Code, a
 //     terminal), so they are visible without leaving bb.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ThreadTitle,
   definePluginApp,
@@ -17,6 +17,7 @@ import {
   experimental_resolveThreadStatus as resolveThreadStatus,
   experimental_useProviders,
   experimental_useSidebarThreads,
+  useBbNavigate,
   useRealtime,
   useRpc,
   useSidebarThreadDraft,
@@ -24,7 +25,17 @@ import {
   type PluginSidebarThread,
   type PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
-import type { Chat, rpcContract } from "./server";
+import type { Chat, WorklogState, rpcContract } from "./server";
+import {
+  ANIMS,
+  CAMERA,
+  CLOSEUPS,
+  FRAME_H,
+  FRAME_W,
+  SHOT_H,
+  SHOT_W,
+} from "./sprites";
+
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
@@ -77,7 +88,10 @@ const REPO_SHORT: Record<string, string> = {
 /** A repo's tag: its established short name, else the name without "measure-". */
 function shortRepo(repo: string): string {
   const key = repo.toLowerCase();
-  return REPO_SHORT[key] ?? (key.startsWith("measure-") ? repo.slice("measure-".length) : repo);
+  return (
+    REPO_SHORT[key] ??
+    (key.startsWith("measure-") ? repo.slice("measure-".length) : repo)
+  );
 }
 
 /** Tags a card draws before folding the rest into a count. */
@@ -157,10 +171,17 @@ interface ChatsState {
   byThread: Record<string, Chat>;
   loaded: boolean;
 }
-const EMPTY: ChatsState = { chats: [], colorSlots: {}, byThread: {}, loaded: false };
+const EMPTY: ChatsState = {
+  chats: [],
+  colorSlots: {},
+  byThread: {},
+  loaded: false,
+};
 
 /** Every chat with a status file, kept current by the server's change signal. */
-function useChats(): ChatsState & { rpc: ReturnType<typeof useRpc<typeof rpcContract>> } {
+function useChats(): ChatsState & {
+  rpc: ReturnType<typeof useRpc<typeof rpcContract>>;
+} {
   const rpc = useRpc<typeof rpcContract>();
   const [state, setState] = useState<ChatsState>(EMPTY);
   const refetch = useCallback(() => {
@@ -191,7 +212,10 @@ function useChats(): ChatsState & { rpc: ReturnType<typeof useRpc<typeof rpcCont
 }
 
 /** When a thread last did anything, in epoch seconds. */
-function lastRanAt(thread: PluginSidebarThread, chat: Chat | undefined): number {
+function lastRanAt(
+  thread: PluginSidebarThread,
+  chat: Chat | undefined,
+): number {
   return Math.max(chat?.updatedAt ?? 0, thread.latestAttentionAt / 1000);
 }
 
@@ -212,15 +236,492 @@ function threadProjects(
 ): string[] {
   // The hook's live list first (it follows a turn as it runs), then bb's
   // record of the thread's tool calls, then the folder it was opened on.
-  if (chat !== undefined && chat.reposTouched.length > 0) return chat.reposTouched;
+  if (chat !== undefined && chat.reposTouched.length > 0)
+    return chat.reposTouched;
   const fromHistory = threadRepos[thread.id];
   if (fromHistory !== undefined && fromHistory.length > 0) return fromHistory;
   const fromChat = chat === undefined ? [] : chatProjects(chat);
   if (fromChat.length > 0) return fromChat;
   if (personalProjectIds.has(thread.projectId)) return [];
-  const folder = (thread.environment?.path ?? "").split("/").filter(Boolean).pop();
+  const folder = (thread.environment?.path ?? "")
+    .split("/")
+    .filter(Boolean)
+    .pop();
   return folder === undefined ? [] : [folder];
 }
+
+// ---- For me: the private tracker (via server.ts and the worklog CLI) ----
+
+/** The tracker's state, refreshed when the store changes and once a minute. */
+function useWorklog(): WorklogState | null {
+  const rpc = useRpc<typeof rpcContract>();
+  const [state, setState] = useState<WorklogState | null>(null);
+  const refetch = useCallback(() => {
+    rpc.call("worklog_state").then(setState, () => undefined);
+  }, [rpc]);
+  useEffect(() => {
+    refetch();
+    const timer = setInterval(refetch, 60_000);
+    return () => clearInterval(timer);
+  }, [refetch]);
+  useRealtime("worklog-changed", refetch);
+  return state;
+}
+
+/**
+ * The For me buddy is Abraham's own pixel sprite (sprites.ts), standing on a
+ * little stage. Motion stops under prefers-reduced-motion.
+ *   sleep    wide, idling     nothing new; next check-in is later
+ *   work     wide, hand at chin  the collector is running
+ *   brief    close, notepad   a morning or midday check-in is waiting, unread
+ *   wrap     close, thumbs up the evening wrap-up is waiting, unread
+ *   ask      close, hand up   questions or proposals wait for you (with a badge)
+ *   done     close, smile     everything set for today is done
+ */
+type Mood = "sleep" | "work" | "brief" | "wrap" | "ask" | "done";
+type CloseMood = keyof typeof CLOSEUPS;
+const isCloseMood = (mood: Mood): mood is CloseMood => mood in CLOSEUPS;
+
+/** Push-in frame times (ms), slowing as the camera comes to a stop. */
+const CAMERA_MS = [70, 80, 90, 110];
+/** Close-up frames 0 and 1: arriving, then the gesture coming in. */
+const ENTER_MS = [120, 120];
+/** The held pose: close-up frames 2–5, looped. */
+const HOLD_FRAMES = [2, 3, 4, 5];
+const HOLD_MS = 420;
+/** "done" is a moment, not a state: the camera pulls back out after this long. */
+const DONE_HOLD_MS = 6000;
+
+/**
+ * The shot on stage: null for the wide shot (the idle sprite), otherwise one
+ * image. Moving between moods always pulls out to wide and pushes back in, so
+ * two close-ups never cut into each other. A mood change mid-move is picked up
+ * when the move finishes.
+ */
+function useCamera(target: CloseMood | null, reduced: boolean): string | null {
+  const [shot, setShot] = useState<string | null>(null);
+  const [held, setHeld] = useState<CloseMood | null>(null);
+  const at = useRef<CloseMood | null>(null);
+  const want = useRef(target);
+  want.current = target;
+  const moving = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (reduced) {
+      at.current = target;
+      setHeld(target);
+      setShot(target ? CLOSEUPS[target][HOLD_FRAMES[0]!]! : null);
+      return;
+    }
+    if (moving.current) return;
+    moving.current = true;
+    const wait = (ms: number) =>
+      new Promise<void>((done) => window.setTimeout(done, ms));
+    const show = (src: string | null) => {
+      if (mounted.current) setShot(src);
+    };
+    void (async () => {
+      try {
+        while (mounted.current && at.current !== want.current) {
+          setHeld(null);
+          const from = at.current;
+          if (from) {
+            const frames = CLOSEUPS[from];
+            show(frames[1]!);
+            await wait(ENTER_MS[1]!);
+            show(frames[0]!);
+            await wait(ENTER_MS[0]!);
+            for (let i = CAMERA.length - 1; i >= 0; i--) {
+              show(CAMERA[i]!);
+              await wait(CAMERA_MS[i]!);
+            }
+            at.current = null;
+            show(null);
+          } else {
+            const to = want.current!;
+            for (let i = 0; i < CAMERA.length; i++) {
+              show(CAMERA[i]!);
+              await wait(CAMERA_MS[i]!);
+            }
+            const frames = CLOSEUPS[to];
+            show(frames[0]!);
+            await wait(ENTER_MS[0]!);
+            show(frames[1]!);
+            await wait(ENTER_MS[1]!);
+            at.current = to;
+            show(frames[HOLD_FRAMES[0]!]!);
+          }
+        }
+        if (mounted.current) setHeld(at.current);
+      } finally {
+        moving.current = false;
+      }
+    })();
+  }, [target, reduced]);
+  // Settled on a close-up: loop its held pose.
+  useEffect(() => {
+    if (!held || reduced) return;
+    let i = 0;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      i = (i + 1) % HOLD_FRAMES.length;
+      setShot(CLOSEUPS[held][HOLD_FRAMES[i]!]!);
+    }, HOLD_MS);
+    return () => clearInterval(timer);
+  }, [held, reduced]);
+  return shot;
+}
+
+/** Idles to pick from, with weights; the impatient ones get likelier late in a day with work open. */
+const IDLES: ReadonlyArray<readonly [string, number, boolean]> = [
+  ["stretch", 2, false],
+  ["think", 2, false],
+  ["watch", 1, true],
+  ["wave", 1, true],
+];
+/**
+ * Frame order per animation; a repeated frame holds that pose for one more
+ * tick. Frame 0 and the last frame are the base pose, so every special
+ * starts and ends where the idle is. "pondering" is think's chin hold, looped
+ * while the collector runs.
+ */
+const SEQUENCES: Record<string, readonly number[]> = {
+  idle: [0, 0, 1, 2, 3, 3, 4, 5, 5, 5, 6, 7, 7],
+  stretch: [0, 1, 2, 3, 3, 3, 4, 4, 4, 4, 4, 3, 5, 6, 7],
+  think: [0, 1, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 7],
+  pondering: [3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4],
+  watch: [0, 1, 2, 3, 3, 4, 4, 4, 4, 4, 5, 5, 6, 7],
+  wave: [0, 1, 2, 3, 4, 5, 4, 5, 4, 5, 5, 6, 7],
+};
+/** Animations that reuse another one's strip. */
+const STRIP_OF: Record<string, string> = { pondering: "think" };
+const stripOf = (name: string) =>
+  ANIMS[STRIP_OF[name] ?? name] ?? ANIMS.idle!;
+const sequenceOf = (name: string): readonly number[] =>
+  SEQUENCES[name] ?? Array.from({ length: stripOf(name).frames }, (_, i) => i);
+/** Idles that read well looped a couple of times; the rest play once. */
+const LOOPABLE = new Set(["idle"]);
+const FRAME_MS = 180;
+/** Base-idle breaths (~2.3s each) between two special idles: 4–6, so ~9–14s of calm. */
+const restLoops = () => 4 + Math.floor(Math.random() * 3);
+function pickIdle(restless: boolean): string {
+  const pool = IDLES.map(
+    ([name, weight, impatient]) =>
+      [name, impatient && restless ? weight * 3 : weight] as const,
+  );
+  let roll = Math.random() * pool.reduce((sum, [, weight]) => sum + weight, 0);
+  for (const [name, weight] of pool) {
+    roll -= weight;
+    if (roll <= 0) return name;
+  }
+  return "stretch";
+}
+
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => window.matchMedia(REDUCED_MOTION).matches,
+  );
+  useEffect(() => {
+    const list = window.matchMedia(REDUCED_MOTION);
+    const change = () => setReduced(list.matches);
+    list.addEventListener("change", change);
+    return () => list.removeEventListener("change", change);
+  }, []);
+  return reduced;
+}
+
+/**
+ * Abraham, standing on a little stage. With nothing to do he idles, switching at
+ * random between his idle loops (fidgeting more late in a day with work still
+ * open). While the collector runs he thinks. When something needs him the
+ * camera pushes in (a drawn frame per step, not a CSS zoom) to a medium
+ * close-up of the mood's gesture, with letterbox bars; it pulls back out when
+ * the moment passes.
+ */
+function Stage({ mood, restless }: { mood: Mood; restless: boolean }) {
+  const reduced = useReducedMotion();
+  const [doneShown, setDoneShown] = useState(false);
+  useEffect(() => {
+    if (mood !== "done") {
+      setDoneShown(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setDoneShown(true), DONE_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [mood]);
+  const camTarget =
+    isCloseMood(mood) && !(mood === "done" && doneShown) ? mood : null;
+  const closeUp = camTarget !== null;
+  const shot = useCamera(camTarget, reduced);
+  const [anim, setAnim] = useState("idle");
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (closeUp) return; // hold still in close-up
+    let current = mood === "work" ? "think" : "idle";
+    let f = 0;
+    let loops = 0;
+    let target = current === "idle" ? restLoops() : 1;
+    setAnim(current);
+    setFrame(0);
+    if (reduced) return;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      f += 1;
+      if (f >= sequenceOf(current).length) {
+        f = 0;
+        loops += 1;
+        if (mood === "work") {
+          // Raise the hand once, then hold it at the chin while collecting.
+          if (current === "think") {
+            current = "pondering";
+            setAnim(current);
+          }
+        } else if (loops >= target) {
+          current = current === "idle" ? pickIdle(restless) : "idle";
+          loops = 0;
+          target =
+            current === "idle"
+              ? restLoops()
+              : LOOPABLE.has(current)
+                ? 2
+                : 1;
+          setAnim(current);
+        }
+      }
+      setFrame(sequenceOf(current)[f] ?? 0);
+    }, FRAME_MS);
+    return () => clearInterval(timer);
+  }, [closeUp, mood, restless, reduced]);
+  const strip = stripOf(anim);
+  return (
+    <div
+      className="fm-stage"
+      data-close={shot !== null}
+      data-reduced={reduced}
+      aria-hidden="true"
+    >
+      <div className="fm-floor" />
+      <div
+        className="fm-cam"
+        hidden={shot !== null}
+        style={{ width: FRAME_W, height: FRAME_H, marginLeft: -FRAME_W / 2 }}
+      >
+        <div
+          className="fm-body"
+          style={{
+            width: FRAME_W,
+            height: FRAME_H,
+            backgroundImage: `url(${strip.src})`,
+            backgroundSize: `${strip.frames * FRAME_W}px ${FRAME_H}px`,
+            backgroundPosition: `${-(frame % strip.frames) * FRAME_W}px 0`,
+          }}
+        />
+      </div>
+      {shot !== null ? (
+        <img
+          className="fm-shot"
+          src={shot}
+          alt=""
+          draggable={false}
+          style={{ width: SHOT_W, height: SHOT_H, marginLeft: -SHOT_W / 2 }}
+        />
+      ) : null}
+      <div className="fm-bar fm-bar-top" />
+      <div className="fm-bar fm-bar-bottom" />
+    </div>
+  );
+}
+
+const STAGE_CSS = `
+.fm-stage { position: relative; height: 140px; overflow: hidden; background-color: #1f1b25;
+  background-image: radial-gradient(120% 95% at 50% 100%, #3b3242 0%, #1f1b25 72%); }
+.fm-floor { position: absolute; left: 0; right: 0; bottom: 0; height: 14px;
+  background: linear-gradient(#2c2633, #221d29); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  transition: transform 0.25s ease; }
+.fm-cam { position: absolute; left: 50%; bottom: 5px; }
+.fm-cam[hidden] { display: none; }
+.fm-body { image-rendering: pixelated; }
+.fm-shot { position: absolute; left: 50%; top: 0; }
+.fm-bar { position: absolute; left: 0; right: 0; height: 0; background: #0b0a0d; transition: height 0.35s ease; z-index: 2; }
+.fm-bar-top { top: 0; }
+.fm-bar-bottom { bottom: 0; }
+.fm-stage[data-close="true"] .fm-floor { transform: translateY(14px); }
+.fm-stage[data-close="true"] .fm-bar { height: 11px; }
+.fm-stage[data-reduced="true"] * { transition: none !important; }
+`;
+
+function nextCheckin(now: Date): string {
+  const day = now.getDay();
+  if (day === 0 || day === 6) return "Weekend · next check-in Monday 9:00";
+  const hour = now.getHours();
+  if (hour < 9) return "Morning check-in at 9:00";
+  if (hour < 13) return "All quiet · midday check-in at 13:00";
+  if (hour < 18) return "All quiet · evening check-in at 18:00";
+  return "All quiet for today";
+}
+
+function forMeStatus(
+  worklog: WorklogState,
+  today: PluginSidebarThread | undefined,
+  todayChat: Chat | undefined,
+  collector: PluginSidebarThread | undefined,
+): { mood: Mood; line: string; badge: number } {
+  const questions = worklog.toConfirm.length + worklog.proposals;
+  if (
+    questions > 0 ||
+    (today !== undefined && attentionRank(today, todayChat) === 0)
+  ) {
+    return {
+      mood: "ask",
+      line:
+        questions > 0
+          ? `${questions} question${questions === 1 ? "" : "s"} for you`
+          : "Needs you",
+      badge: questions,
+    };
+  }
+  if (today?.isUnread) {
+    const kind = worklog.latestCheckin?.kind ?? "";
+    if (kind === "evening")
+      return { mood: "wrap", line: "Evening wrap-up ready", badge: 0 };
+    const label = kind ? kind[0]!.toUpperCase() + kind.slice(1) : "";
+    return {
+      mood: "brief",
+      line: label ? `${label} check-in ready` : "Check-in ready",
+      badge: 0,
+    };
+  }
+  if (collector !== undefined && collector.status !== "idle") {
+    return {
+      mood: "work",
+      line: "Collecting Slack, meetings, ClickUp…",
+      badge: 0,
+    };
+  }
+  const total = worklog.counts.today_total ?? 0;
+  if (total > 0 && (worklog.counts.today_done ?? 0) >= total) {
+    return { mood: "done", line: "Everything for today is done", badge: 0 };
+  }
+  return { mood: "sleep", line: nextCheckin(new Date()), badge: 0 };
+}
+
+/** Pinned at the top of the sidebar: today's For me chat, drawn as the robot. */
+function ForMeCard({
+  worklog,
+  threads,
+  byThread,
+  worklogProjectId,
+  active,
+  onNavigate,
+}: {
+  worklog: WorklogState;
+  threads: readonly PluginSidebarThread[];
+  byThread: Record<string, Chat>;
+  /** The bb project the tracker's chats run in; any new chat there is the assistant. */
+  worklogProjectId: string | null;
+  active: boolean;
+  onNavigate: () => void;
+}) {
+  const nav = useBbNavigate();
+  // Ask: always a fresh chat in the Worklog project, whatever the day. The
+  // folder's CLAUDE.md makes it the assistant; the check-in thread is untouched.
+  const ask = () => {
+    if (!worklogProjectId) return;
+    nav.toCompose({ projectId: worklogProjectId, focusPrompt: true });
+    onNavigate();
+  };
+  const today = threads.find((thread) => thread.id === worklog.todayThread);
+  const collector = threads.find(
+    (thread) => thread.id === worklog.collectorThread,
+  );
+  const { mood, line, badge } = forMeStatus(
+    worklog,
+    today,
+    today ? byThread[today.id] : undefined,
+    collector,
+  );
+  const done = worklog.counts.today_done ?? 0;
+  const total = worklog.counts.today_total ?? 0;
+  const open = () => {
+    if (today) {
+      nav.toThread(today.id);
+      onNavigate();
+    } else {
+      if (worklog.hubUrl) window.open(worklog.hubUrl, "_blank", "noopener");
+    }
+  };
+  const restless = new Date().getHours() >= 16 && total > done;
+  return (
+    <div className="flex flex-col gap-1 pt-2">
+      <style>{STAGE_CSS}</style>
+      <button
+        type="button"
+        onClick={open}
+        aria-current={active ? "page" : undefined}
+        aria-label={`${today ? today.displayTitle : "For me"}: ${line}`}
+        className={cn(
+          "relative flex w-full flex-col overflow-hidden rounded-xl border text-left text-muted-foreground transition-[border-color,box-shadow] hover:border-foreground/30 focus-visible:outline-none",
+          active && "border-foreground/40",
+        )}
+        style={
+          mood === "ask"
+            ? {
+                borderColor: "#D97757",
+                boxShadow: "0 0 0 3px rgb(217 119 87 / 0.18)",
+              }
+            : mood === "brief" || mood === "wrap"
+              ? { borderColor: "currentColor" }
+              : undefined
+        }
+      >
+        <Stage mood={mood} restless={restless} />
+        <span className="flex min-w-0 flex-col px-3 py-2">
+          <span className="truncate text-[13px] font-medium text-foreground">
+            {today ? today.displayTitle : "For me"}
+          </span>
+          <span className="truncate text-xs">{line}</span>
+        </span>
+        {badge > 0 ? (
+          <span
+            className="absolute right-2 top-2 z-10 rounded-full px-1.5 text-[11px] font-semibold tabular-nums text-white shadow"
+            style={{ background: "#D97757" }}
+          >
+            {badge}
+          </span>
+        ) : null}
+      </button>
+      <div className="flex items-center gap-1.5">
+        {worklogProjectId ? (
+          <button type="button" onClick={ask} className={FM_BUTTON}>
+            <Icon name="MessageSquarePlus" className="size-3.5" />
+            Ask
+          </button>
+        ) : null}
+        {worklog.hubUrl ? (
+          <a href={worklog.hubUrl} target="_blank" rel="noopener" className={FM_BUTTON}>
+            <Icon name="ListTodo" className="size-3.5" />
+            Hub
+          </a>
+        ) : null}
+      </div>
+      <div className="px-1 text-[11px] tabular-nums text-muted-foreground">
+        {total > 0 ? `${done}/${total} today` : `${worklog.counts.week ?? 0} this week`}
+        {worklog.mode === "shadow" ? " · shadow mode" : ""}
+      </div>
+    </div>
+  );
+}
+
+/** Ask / Hub under the card: real buttons, with a raised edge and a press. */
+const FM_BUTTON =
+  "inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm transition-[background-color,transform,box-shadow] duration-100 hover:bg-accent active:translate-y-px active:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 // ---- the Today list ----
 
@@ -235,7 +736,10 @@ function ProjectName({
   more?: number;
 }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1 text-foreground" title={repo}>
+    <span
+      className="inline-flex min-w-0 items-center gap-1 text-foreground"
+      title={repo}
+    >
       <span
         aria-hidden="true"
         className="size-1.5 shrink-0 rounded-full"
@@ -288,7 +792,11 @@ function rowDetail(
       const age = Math.max(0, now - chat.updatedAt);
       const recent = age < RECENT_SECONDS;
       return chat.status === "error"
-        ? { text: `failed ${formatAge(age)}`, hue: STATUS_HUE.error, numeric: true }
+        ? {
+            text: `failed ${formatAge(age)}`,
+            hue: STATUS_HUE.error,
+            numeric: true,
+          }
         : {
             text: formatAge(age),
             hue: recent && chat.status === "done" ? STATUS_HUE.done : undefined,
@@ -308,7 +816,10 @@ function rowDetail(
 }
 
 /** Needs you, failed, working, then the rest: the menu bar app's order. */
-function attentionRank(thread: PluginSidebarThread, chat: Chat | undefined): number {
+function attentionRank(
+  thread: PluginSidebarThread,
+  chat: Chat | undefined,
+): number {
   if (thread.hasPendingInteraction || chat?.status === "needs_input") return 0;
   if (chat?.status === "error" || thread.indicator === "unread-error") return 1;
   if (thread.status !== "idle" || chat?.status === "working") return 2;
@@ -351,7 +862,9 @@ function actionTarget(thread: PluginSidebarThread) {
 /** bb's status glyph when the thread has something to say, else its agent's icon. */
 function ThreadGlyph({ thread }: { thread: PluginSidebarThread }) {
   const { providers } = experimental_useProviders();
-  const provider = providers.find((candidate) => candidate.id === thread.providerId);
+  const provider = providers.find(
+    (candidate) => candidate.id === thread.providerId,
+  );
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
   const rowStatus = useSidebarThreadRowStatus(thread.id);
   const status = resolveThreadStatus({
@@ -360,12 +873,23 @@ function ThreadGlyph({ thread }: { thread: PluginSidebarThread }) {
     hasUnsubmittedDraft,
     rowStatus,
   });
+  // bb marks a finished, unopened thread with a grey dot, which reads as idle
+  // and clashes with the green age beside it. Draw that dot in the finished
+  // green instead; once the thread is opened it shows the agent's logo.
+  const unreadDone =
+    status.indicator === "unread-success" && status.rowStatus === null;
   return (
     <span
       className="flex size-4 shrink-0 items-center justify-center"
       title={status.label ?? undefined}
     >
-      {status.indicator === "none" && status.rowStatus === null ? (
+      {unreadDone ? (
+        <span
+          className="size-2 rounded-full"
+          style={{ backgroundColor: STATUS_HUE.done }}
+          aria-label={status.label ?? undefined}
+        />
+      ) : status.indicator === "none" && status.rowStatus === null ? (
         <ProviderIcon
           providerKind="agent"
           provider={provider ?? { id: thread.providerId }}
@@ -402,9 +926,15 @@ function TodayCard({
   onNavigate: () => void;
 }) {
   const chat = data.byThread[thread.id];
-  const working = chat !== undefined && isWorking(chat) && chat.turnStartedAt > 0;
+  const working =
+    chat !== undefined && isWorking(chat) && chat.turnStartedAt > 0;
   const now = useNow(working);
-  const projects = threadProjects(thread, chat, data.personalProjectIds, data.threadRepos);
+  const projects = threadProjects(
+    thread,
+    chat,
+    data.personalProjectIds,
+    data.threadRepos,
+  );
   const rank = attentionRank(thread, chat);
   const detail: RowDetail | null =
     rowDetail(thread, chat, working ? now : data.coarseNow) ??
@@ -413,8 +943,17 @@ function TodayCard({
       : rank === 2
         ? { text: "Working", hue: STATUS_HUE.working, numeric: false }
         : null);
-  // Only a card that wants something from you is tinted; the rest stay quiet.
-  const edge = rank === 0 ? STATUS_HUE.needs_input : rank === 1 ? STATUS_HUE.error : undefined;
+  // Three tiers, told apart by shape before colour: a card that wants you has a
+  // tinted edge and fill, a card still in flight a plain edge, and a finished
+  // or idle card none (it shows as a box only on hover or when selected). The
+  // border is always 1px, transparent when hidden, so nothing shifts.
+  const edge =
+    rank === 0
+      ? STATUS_HUE.needs_input
+      : rank === 1
+        ? STATUS_HUE.error
+        : undefined;
+  const inFlight = edge === undefined && rank === 2;
   return (
     <li>
       <ThreadActionsContextMenu thread={actionTarget(thread)}>
@@ -426,17 +965,19 @@ function TodayCard({
             .filter(Boolean)
             .join(" · ")}
           className={cn(
-            "flex min-w-0 flex-col gap-1 rounded-lg border border-border px-2.5 py-2 text-left no-underline",
+            "flex min-w-0 flex-col gap-1 rounded-lg border px-2.5 py-2 text-left no-underline",
+            inFlight ? "border-border" : "border-transparent",
             "hover:bg-accent focus-visible:bg-accent focus-visible:outline-none",
-            active && "bg-accent",
+            // Selected also gets a firmer edge, so it differs from hover.
+            active && "border-foreground/30 bg-accent",
           )}
           style={
-            edge === undefined
-              ? undefined
-              : {
+            edge !== undefined
+              ? {
                   borderColor: `color-mix(in srgb, ${edge} 55%, transparent)`,
                   backgroundImage: `linear-gradient(color-mix(in srgb, ${edge} 9%, transparent), color-mix(in srgb, ${edge} 9%, transparent))`,
                 }
+              : undefined
           }
         >
           <span className="flex min-w-0 items-start gap-2">
@@ -461,7 +1002,9 @@ function TodayCard({
                     key={repo}
                     repo={repo}
                     hue={projectHue(repo, data.colorSlots)}
-                    more={index === TAGS_MAX - 1 ? projects.length - TAGS_MAX : 0}
+                    more={
+                      index === TAGS_MAX - 1 ? projects.length - TAGS_MAX : 0
+                    }
                   />
                 ))}
               </span>
@@ -544,8 +1087,21 @@ function readEarlierOpen(): boolean {
 function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
   const { rpc, ...state } = useChats();
   const { threads, projects, status } = experimental_useSidebarThreads();
+  const worklog = useWorklog();
+  const forMeThread = worklog?.todayThread ?? "";
+  // The tracker's chats (Ask, check-ins, collector) live in the "Worklog" project
+  // and are reached from the For me card, so the list leaves them out.
+  const worklogProjectId = useMemo(
+    () => projects.find((project) => project.name === "Worklog")?.id ?? null,
+    [projects],
+  );
   const personalProjectIds = useMemo(
-    () => new Set(projects.filter((project) => project.isPersonal).map((project) => project.id)),
+    () =>
+      new Set(
+        projects
+          .filter((project) => project.isPersonal)
+          .map((project) => project.id),
+      ),
     [projects],
   );
   const coarseNow = useNow(true, 30_000);
@@ -555,19 +1111,28 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
     const today: PluginSidebarThread[] = [];
     const earlier: PluginSidebarThread[] = [];
     for (const thread of threads) {
-      if (thread.isHidden || thread.isArchived) continue;
-      (isToday(thread, state.byThread[thread.id], midnight) ? today : earlier).push(thread);
+      if (
+        thread.isHidden ||
+        thread.isArchived ||
+        thread.id === forMeThread ||
+        (worklogProjectId !== null && thread.projectId === worklogProjectId)
+      )
+        continue;
+      (isToday(thread, state.byThread[thread.id], midnight)
+        ? today
+        : earlier
+      ).push(thread);
     }
     const recency = (a: PluginSidebarThread, b: PluginSidebarThread) =>
       lastRanAt(b, state.byThread[b.id]) - lastRanAt(a, state.byThread[a.id]);
     today.sort(
       (a, b) =>
-        attentionRank(a, state.byThread[a.id]) - attentionRank(b, state.byThread[b.id]) ||
-        recency(a, b),
+        attentionRank(a, state.byThread[a.id]) -
+          attentionRank(b, state.byThread[b.id]) || recency(a, b),
     );
     earlier.sort(recency);
     return { today, earlier };
-  }, [threads, state.byThread, midnight]);
+  }, [threads, state.byThread, midnight, forMeThread, worklogProjectId]);
 
   // Repos only for the cards; `state.chats` changes whenever a thread ran.
   const wanted = today
@@ -604,17 +1169,34 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
   };
   // With nothing today, the older threads are the list: never a blank sidebar.
   const showEarlier = earlierOpen || today.length === 0;
-  const data: ListData = { ...state, personalProjectIds, threadRepos, coarseNow };
+  const data: ListData = {
+    ...state,
+    personalProjectIds,
+    threadRepos,
+    coarseNow,
+  };
 
   return (
     <nav aria-label="Threads" className="flex flex-col gap-1 px-2 pb-2">
-      <h2 className="px-1 pb-0.5 pt-2 text-xs font-medium text-muted-foreground">Today</h2>
+      {worklog?.available ? (
+        <ForMeCard
+          worklog={worklog}
+          threads={threads}
+          byThread={state.byThread}
+          worklogProjectId={worklogProjectId}
+          active={forMeThread !== "" && forMeThread === activeThreadId}
+          onNavigate={onNavigate}
+        />
+      ) : null}
+      <h2 className="px-1 pb-0.5 pt-2 text-xs font-medium text-muted-foreground">
+        Today
+      </h2>
       {today.length === 0 ? (
         <p className="px-1 pb-1 text-xs text-muted-foreground">
           {status === "loading" ? "Loading threads…" : "Nothing started today."}
         </p>
       ) : (
-        <ul className="flex flex-col gap-1.5">
+        <ul className="flex flex-col gap-2">
           {today.map((thread) => (
             <TodayCard
               key={thread.id}
@@ -633,11 +1215,14 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
             onClick={toggleEarlier}
             aria-expanded={showEarlier}
             disabled={today.length === 0}
-            className="mt-2 flex items-center gap-1 rounded-md px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none disabled:hover:text-muted-foreground"
+            className="mt-3 flex items-center gap-1 rounded-md px-1 py-1 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none disabled:hover:text-muted-foreground"
           >
             <Icon
               name="ChevronRight"
-              className={cn("size-3 transition-transform", showEarlier && "rotate-90")}
+              className={cn(
+                "size-3 transition-transform",
+                showEarlier && "rotate-90",
+              )}
             />
             Earlier
             <span className="tabular-nums opacity-70">{earlier.length}</span>
@@ -658,10 +1243,13 @@ function TodayList({ activeThreadId, onNavigate }: PluginThreadListProps) {
                 <li>
                   <button
                     type="button"
-                    onClick={() => setEarlierShown((shown) => shown + EARLIER_PAGE)}
+                    onClick={() =>
+                      setEarlierShown((shown) => shown + EARLIER_PAGE)
+                    }
                     className="w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
                   >
-                    Show {Math.min(EARLIER_PAGE, earlier.length - earlierShown)} more
+                    Show {Math.min(EARLIER_PAGE, earlier.length - earlierShown)}{" "}
+                    more
                   </button>
                 </li>
               ) : null}
@@ -697,6 +1285,9 @@ function OtherChatRow({
         onClick={onOpen}
         className="flex w-full min-w-0 flex-col gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
       >
+        <span className="truncate text-sm text-foreground">
+          {chat.title || "Untitled chat"}
+        </span>
         <span className="flex min-w-0 items-center gap-1.5 text-xs">
           <ProjectName
             repo={repo}
@@ -719,9 +1310,6 @@ function OtherChatRow({
             {text}
           </span>
         </span>
-        <span className="truncate text-sm text-foreground">
-          {chat.title || "Untitled chat"}
-        </span>
       </button>
     </li>
   );
@@ -740,7 +1328,9 @@ function OtherChats() {
         ),
     [chats],
   );
-  const now = useNow(others.some((chat) => isWorking(chat) && chat.turnStartedAt > 0));
+  const now = useNow(
+    others.some((chat) => isWorking(chat) && chat.turnStartedAt > 0),
+  );
   return (
     <section aria-label="Chats outside bb" className="px-1 pb-1">
       <h2 className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">
@@ -773,7 +1363,8 @@ export default definePluginApp((app) => {
   app.slots.experimental_threadList({
     id: "today",
     title: "Today",
-    description: "Cards for the threads you ran today; everything older folded under Earlier.",
+    description:
+      "Cards for the threads you ran today; everything older folded under Earlier.",
     component: TodayList,
   });
   app.experimental_sidebarFooter.register({
